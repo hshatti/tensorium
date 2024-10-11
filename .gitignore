@@ -25,8 +25,31 @@
 *.la
 *.a
 *.lib
+*.bin
 
 # Executables
 *.exe
 *.out
 *.app
+
+# Lazarus
+backup/
+lib/
+*.ppu
+*.dbg
+
+# Delphi
+__*/ 
+*dcu
+*.identcache
+*.local
+*-ubyte
+*meta.txt
+
+#misc media
+*.jpg
+*.bmp
+*.mkv
+*.ts
+*.avi
+*.mp4
