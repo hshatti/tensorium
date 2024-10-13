@@ -396,6 +396,10 @@ type
     class procedure _conv2d(const src:PT; ker:PT; var dest:PT; const wSrc, hSrc, wKernel, hKernel, wPad, hPad, xStr, yStr, xDil, yDil:SizeInt); static;
     class procedure polynomial(const N:SizeInt; const coef :TArray<T>; dst:PT; const aStdDev :T); overload; static;
     class function xLinear(const n, deg:SizeInt; const x:T; const coef: TArray<T>):T;static;
+    class function deCompose(var qr: PT; const m, n, rwidthq: SizeInt; var alpha: PT; var pivot: PSizeInt):Integer;static;
+    class procedure solve(const qr: TArray<T>; const m, n, rwidthq: SizeInt; var alpha: TArray<T>; var pivot: TArray<SizeInt>; var r, y: TArray<T>);static;
+
+
     procedure AssignTo(var dst:TTensor<T>);
     //class function matDeterminant(const mat:PT; const rank:SizeInt):T; overload;static;
     //class procedure matDegrade(const matIn:PT; const matOut:PT;const rank:SizeInt; const row,col:SizeInt); overload; static;
@@ -516,6 +520,7 @@ type
     function matDegrade(const row, col:SizeInt):TTensor<T>;overload;
     procedure matTranspose(const dst:TTensor<T>);overload;
     function matTranspose():TTensor<T>;overload;
+    function SolveLeastSquares(const b:PT; var coef: PT):integer;overload;
     procedure Conv2D(const AKernels, dst:TTensor<T>; wPadding:SizeInt = -1; hPadding:SizeInt = -1; xStride:SizeInt=1; yStride:SizeInt=1; xDilation:SizeInt=1; yDilation:SizeInt=1); overload;
     procedure Abs(const stride:SizeInt=1);
     procedure sumAbs(var dst: PT);overload;
@@ -638,6 +643,8 @@ type
 
     procedure getGroup(const idx:SizeInt; const dst:PT); overload;
     property Group[idx:SizeInt]:TTensor<T> read GetGroup write SetGroup;
+    class function SolveLeastSquares(const a: PT; const m, n, rwidtha: SizeInt; const b:PT; var x: PT):integer; overload;static;
+    class function FitPloynomial(const m:SizeInt; degree: SizeInt; const x, y:PT; var b: PT):integer;static;
 
     class function countMatch(const N:SizeInt; const src1:PT; const stride1:SizeInt; const src2:PT; const stride2:SizeInt): SizeInt;static;
     class function countNonValue(const N:SizeInt; const val:T; const src:PT; const stride:SizeInt =1):SizeInt;overload; static;
@@ -4340,6 +4347,285 @@ begin
     result := coef[n]
 end;
 
+class function TTensor<T>.deCompose(var qr: PT; const m, n, rwidthq: SizeInt;
+  var alpha: PT; var pivot: PSizeInt): Integer;
+var  i, j, jbar, k,     ii        : SizeInt;
+     beta, sigma, alphak, qrkk, s : T;
+     y, sum                       : TArray<T>;
+Begin
+  if not assigned(sumsqrv) then sumsqrv := TTensor<T>.sumsqr;
+  result := 1;
+  setLength(y, n);
+  setLength(sum, n);
+  for j:=0 To n-1 Do
+    begin
+      //s := 0;
+      //for i:=0 To m-1 Do
+      //  s := plus(s, sqr(qr[i*rwidthq+j]));
+      sum[j] := sumsqrv(m, qr+j, rwidthq);
+      pivot[j] := j
+    end; {j}
+  for k:=0 to n-1 do
+    begin
+      sigma := sum[k];
+      jbar := k;
+      for j:=k to n-1 do
+        if compare(sigma , sum[j])<0 then
+          begin
+            sigma := sum[j];
+            jbar := j
+          end;
+      if jbar <> k then
+        begin
+          i := pivot[k];
+          pivot[k] := pivot[jbar];
+          pivot[jbar] := i;
+          sum[jbar] := sum[k];
+          sum[k] := sigma;
+          For i:=0 to m-1 do
+            begin
+              ii := i*rwidthq;
+              sigma := qr[ii+k];
+              qr[ii+k] := qr[ii+jbar];
+              qr[ii+jbar] := sigma
+            end; {i}
+        end; {column interchange}
+      //sigma := zero;
+      //for i:=k to m-1 do
+      //  sigma := plus(sigma, sqr(qr[i*rwidthq+k]));
+      sigma := sumsqrv(m - k, qr + k*(rwidthq+1), rwidthq);
+      if compare(sigma, zero)=0 then
+        begin
+          result := 2;
+          exit
+        end;
+      qrkk := qr[k*rwidthq+k];
+      if compare(qrkk, zero) < 0 then
+        alphak := sqrt(sigma)
+      else
+        alphak := minus(zero, sqrt(sigma));
+      alpha[k] := alphak;
+      beta := division(one, minus(sigma, times(qrkk, alphak)));
+      qr[k*rwidthq+k] := minus(qrkk, alphak);
+      for j:=k+1 to n-1 do
+        begin
+          s := zero;
+          for i:=k to m-1 do
+            begin
+              ii := i*rwidthq;
+              s := plus(s, times(qr[ii+k], qr[ii+j]))
+            end; {i}
+          y[j] := times(beta, s)
+        end; {j}
+      for j:=k+1 to n-1 do
+        begin
+          for i:=k to m-1 do
+            begin
+              ii := i*rwidthq;
+              qr[ii+j] := minus(qr[ii+j], times(qr[ii+k], y[j]))
+            end; {i}
+          sum[j] := minus(sum[j], sqr(qr[k*rwidthq+j]))
+        end {j}
+    end; {k}
+end; {decomp}
+
+class procedure TTensor<T>.solve(const qr: TArray<T>; const m, n,
+  rwidthq: SizeInt; var alpha: TArray<T>; var pivot: TArray<SizeInt>; var r,
+  y: TArray<T>);
+var    i, j, ii            : SizeInt;
+       gamma, s            : T;
+       z                   : TArray<T>;
+begin
+  setLength(z, n);
+  for j:=0 to n-1 do
+    begin
+      gamma := zero;
+      for i:=j to m-1 do
+        gamma := plus(gamma, times(qr[i*rwidthq+j], r[i]));
+      gamma := division(gamma, times(alpha[j], qr[j*rwidthq+j]));
+      for i:=j to m-1 do
+        r[i] := plus(r[i], times(gamma, qr[i*rwidthq+j]))
+    end; {j}
+  z[n-1] := division(r[n-1], alpha[n-1]);
+  for i:=n-2 downto 0 do
+    begin
+      s := r[i];
+      ii := i*rwidthq;
+      for j:=i+1 to n-1 do
+        s := minus(s, times(qr[ii+j], z[j]));
+      z[i] := division(s, alpha[i])
+    end; {i}
+  for i:=0 to n-1 do
+    y[pivot[i]] := z[i];
+end; {solve}
+
+class function TTensor<T>.SolveLeastSquares(const a: PT; const m, n,
+  rwidtha: SizeInt; const b: PT; var x: PT): integer;
+
+var
+  i, j, ii          : SizeInt;
+  normy0, norme1, s : T;
+  pa, pb, px        : PT;
+  qr, alpha, e, y, r: TArray<T>;
+  pivot             : TArray<SizeInt>;
+  dnorme1, dnormy0  : double;
+begin
+  if not assigned(sumsqrv) then sumsqrv := TTensor<T>.sumsqr;
+  if (n<1) or (m<n) then
+      exit(3);
+  pa := pointer(a);
+  pb := pointer(b);
+  px := pointer(x);
+  setLength(qr, m*n);
+  setLength(alpha, n);
+  setLength(e, n);
+  setLength(y, n);
+  setLength(r, m);
+  setLength(pivot, n);
+  for i:=0 to m-1 do
+    move(pa[i*rwidtha], qr[i*n], n*sizeof(T));
+  result := decompose(PT(qr), m, n, n, PT(alpha), PSizeInt(pivot));
+  if result=2 then
+      exit;
+  move(pb[0], r[0], m*SizeOf(T));
+  solve(qr, m, n, n, alpha, pivot, r, y);
+  for i:=0 to m-1 do
+    begin
+      s := pb[i];
+      ii := i*rwidtha;
+      for j:=0 to n-1 do
+        s := minus(s, times(pa[ii+j], y[j]));
+      r[i] := s
+    end; {i}
+  solve(qr, m, n, n, alpha, pivot, r, e);
+  //normy0 := zero;
+  //norme1 := zero;
+  //for i:=0 to n-1 do
+  //  begin
+  //    normy0 := plus(normy0, sqr(y[i]));
+  //    norme1 := plus(norme1, sqr(e[i]))
+  //  end; {i}
+  normy0 := sumsqrv(n, pointer(y), 1);
+  norme1 := sumsqrv(n, pointer(e), 1);
+
+  vcvtd(1, @norme1, @dnorme1);
+  vcvtd(1, @normy0, @dnormy0);
+  if dnorme1 > 0.0625*dnormy0 then
+      exit(2);
+  move(y[0], x[0], n*SizeOf(T))
+end; {slegls}
+
+class function TTensor<T>.FitPloynomial(const m: SizeInt; degree: SizeInt;
+  const x, y: PT; var b: PT): integer;
+
+procedure ortpol(m, degree: SizeInt; const  x:PT; var alpha, beta: PT);
+var
+  i, j : SizeInt;
+  xppn1, ppn1, ppn, p, alphaj, betaj : T;
+  pn, pn1 : TArray<T>;
+begin
+  setLength(pn, m);
+  setLength(pn1, m);
+  xppn1:=zero;
+  ppn1:=casti(m);
+  for i:=0 to m-1 do
+    begin
+      pn[i]  := zero;
+      pn1[i] := one;
+      xppn1  := xppn1 + x[i]
+    end;
+  alpha[0]:=division(xppn1, ppn1);
+  beta[0]:=zero;
+  for j:=1 to degree-1 do
+    begin
+      alphaj := alpha[j-1];
+      betaj := beta[j-1];
+      ppn   := ppn1;
+      ppn1  := zero;
+      xppn1 := zero;
+      for i:=0 to m-1 do
+        begin
+          p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
+          pn[i]  := pn1[i];
+          pn1[i] := p;
+          p      := sqr(p);
+          ppn1   := ppn1+p;
+          xppn1:=xppn1+x[i]*p
+        end;
+      alpha[j] := division(xppn1, ppn1);
+      beta[j]  := division(ppn1, ppn)
+    end;
+end;
+
+procedure ortcoe(m, degree: SizeInt; const x, y, alpha, beta:PT; var a: PT);
+var
+  i, j : SizeInt;
+  fpn, ppn, p, alphaj, betaj : T;
+  pn, pn1  : TArray<T>;
+
+begin
+  setLength(pn, m);
+  setLength(pn1, m);
+  fpn:=zero;
+  for i:=0 to m-1 do
+    begin
+      pn[i]:=0;
+      pn1[i]:=1;
+      fpn:=fpn+y[i]
+    end;
+  a[0] := division(fpn, m);
+  for j:=0 to degree-1 do
+    begin
+      fpn:=0; ppn:=0; alphaj:=alpha[j]; betaj:=beta[j];
+      for i:=0 to m-1 do
+        begin
+          p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
+          pn[i]  := pn1[i];
+          pn1[i] := p;
+          fpn    := fpn + y[i]*p;
+          ppn    := ppn + p*p
+        end;
+      a[j+1] := division(fpn , ppn)
+    end;
+end;
+
+var
+  i, j : SizeInt;
+  fsum  : T;
+  a, alpha, beta: TArray<T>;
+begin
+  if (degree<0) or (m<1) then begin
+    exit(3);
+  end;
+  result:=1;
+  if not assigned(sumv) then sumv := TTensor<T>.sum;
+  if degree = 0 then
+    begin
+      fsum := sumv(m, y, 1);
+      b[0]:= division(fsum, casti(m))
+    end
+  else
+    begin
+      if degree>m-1 then begin
+        fillchar(b[m], (degree-m+1)*sizeof(T), 0);
+        degree := m-1
+      end;
+      setLength(alpha, degree);
+      setLength(beta, degree);
+      setLength(a, (degree+1));
+      ortpol(m, degree, x, pointer(alpha), pointer(beta));
+      ortcoe(m, degree, x, y, pointer(alpha), pointer(beta), pointer(a));
+
+      move(a[0], b[0], (degree+1)*sizeof(T));
+      for i:=0 to degree-1 do
+        for j:=degree-i-1 downto 0 do
+          begin
+            b[j+i] := b[j+i] - alpha[j] * b[j+i+1];
+            if j+i<>degree-1 then
+              b[j+i] := b[j+i] - beta[j+1] * b[j+i+2]
+          end
+    end
+end;
 constructor TTensor<T>.Create(const newShape: TSizes; aGroups: SizeInt);
 var sz:SizeInt;
 begin
@@ -5528,6 +5814,11 @@ begin
   shp[n-1] := FShape[n];
   result.resize(shp, groups);
   matTranspose(result);
+end;
+
+function TTensor<T>.SolveLeastSquares(const b: PT; var coef: PT): integer;
+begin
+
 end;
 
 procedure TTensor<T>.Conv2D(const AKernels, dst: TTensor<T>; wPadding: SizeInt; hPadding: SizeInt; xStride: SizeInt; yStride: SizeInt; xDilation: SizeInt; yDilation: SizeInt);
@@ -7035,15 +7326,15 @@ procedure TTensor<T>.plot(const xAxis: TTensor<T>);
 const
   OverlineOn = #$1B'[53m';
   OverlineOff = #$1B'[55m';
-  xLen :integer = 60;
-  yLen :integer = 30;
+  xLen :integer = 40;
+  yLen :integer = 15;
 
-  xTicks : integer = 5;
-  yTicks : integer= 5;
+  xTicks : integer = 4;
+  yTicks : integer= 4;
   prec = 0.001;
 
 const
-  colors : array[0..3] of longword =($ffcc00, $ff44ff, $0088ff, $ffff00);
+  colors : array[0..3] of longword =($ffcc00, $ff00ff, $0088ff, $ffff00);
   dots :array[0..255] of string = (
            ' ','⠁','⠂','⠃','⠄','⠅','⠆','⠇','⡀','⡁','⡂','⡃','⡄','⡅','⡆','⡇'
           ,'⠈','⠉','⠊','⠋','⠌','⠍','⠎','⠏','⡈','⡉','⡊','⡋','⡌','⡍','⡎','⡏'
@@ -7236,7 +7527,7 @@ begin
   end;
 
   for i := 0 to yLen do begin
-    l := $18 + i * $20 div yLen;
+    l := $8 + i * $20 div yLen;
     v[i] :=format(#$1B'[48;2;%d;%d;%dm',[trunc(l*0.8),0,l]);
     for j := 0 to xLen do begin
       k :=0; c :=0; color :=0;
@@ -7248,9 +7539,18 @@ begin
           end;
           inc(k);
         end;
-      v[i] := v[i] + format(#$1B'[38;2;%d;%d;%dm',[color and $ff, (color shr $8) and $ff, (color shr $10) and $ff]) + dots[c]
+      d := dots[c];
+      if (d=' ') then begin
+          if (j+2>0) and (j+2<xLen) and (s[j+2]='''')  then
+            d := #$1B'[2m'#$1b'[37m¦' // ¦
+          else if (a[i]<>'') and (d =' ') then
+            d := #$1B'[2m'#$1b'[37mˍ'
+        end
+      else
+        d:= #$1B'[22m'+d;
+      v[i] := v[i] + format(#$1B'[38;2;%d;%d;%dm',[color and $ff, (color shr $8) and $ff, (color shr $10) and $ff]) + d
     end;
-    v[i]:=v[i]+#$1B'[49m'#$1B'[39m';
+    v[i]:=v[i]+#$1B'[22m'#$1B'[49m'#$1B'[39m';
   end;
 
 
