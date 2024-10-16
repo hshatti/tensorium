@@ -12,7 +12,7 @@
   {$ifdef MSWINDOWS}{$FPUType AVX2}
   {$endif}
 {$else}
-{$excessprecision off}
+  {$excessprecision off}
 {$endif}
 {$pointermath on}
 {$WRITEABLECONST ON}
@@ -190,7 +190,8 @@ type
     argMaxv, argMinv, argmaxabsv, argminabsv : function(const N :SizeInt; const src:PT; const INCX:SizeInt):SizeInt;
     argMaxv32, argMinv32, argmaxabsv32, argminabsv32 : function(const N :SizeInt; const src:PT; const INCX:Int32):Int32;
     dotvv     : function (N:SizeInt; src1:PT; stride1:SizeInt; src2:PT; stride2:SizeInt):T;
-    minmaxvss : procedure(const N:SizeInt; const src:PT; const stride:SizeInt; var outMin, outMax:T; var outArgMin, outArgMax : SizeInt);
+    minmaxvsi : procedure(const N:SizeInt; const src:PT; const stride:SizeInt; var outMin, outMax:T; var outArgMin, outArgMax : SizeInt);
+    minmaxvss : procedure(const N:SizeInt; const src:PT; const stride:SizeInt; var outMin, outMax:T);
     vcvtb   : procedure(const N:SizeInt; const src:PT; const dst:PByte  );
     //vcvtl   : procedure(const N:SizeInt; const src:PT; const dst:PUint32);
     //vcvtq   : procedure(const N:SizeInt; const src:PT; const dst:PUint64);
@@ -376,6 +377,7 @@ type
     class procedure __mins(const N:SizeInt; const src:PT; const groups:SizeInt; const dst:PT); overload; static;
 
     class procedure minMax(const N:SizeInt; const src:PT; const stride:SizeInt; var outMin, outMax:T; var outArgMin, outArgMax :SizeInt); overload; static;
+    class procedure minMax(const N:SizeInt; const src:PT; const stride:SizeInt; var outMin, outMax:T); overload; static;
 
     class function argMin(const N:SizeInt; const src:PT; const stride:SizeInt =1):SizeInt; overload; static;
     class function argMax(const N:SizeInt; const src:PT; const stride:SizeInt =1):SizeInt; overload; static;
@@ -615,6 +617,8 @@ type
     procedure polynomial(const coef:TArray<T>);                       overload;
     procedure polynomial(const coef:TArray<T>; const aStdDev:T);      overload;
     function countValue(const src:T; const stride:SizeInt = 1):SizeInt;
+    procedure histogram(const aCount:SizeInt; var dst:PInteger; outMin:PT = nil; outMax : PT= nil);overload;
+
     procedure plot(const xAxis:TTensor<T>); overload;
     procedure plot(); overload;
 
@@ -643,6 +647,7 @@ type
 
     procedure getGroup(const idx:SizeInt; const dst:PT); overload;
     property Group[idx:SizeInt]:TTensor<T> read GetGroup write SetGroup;
+    class procedure histogram(const N:SizeInt; const src:PT; const aCount:SizeInt; dst:PInteger; outMin:PT =nil; outMax:PT =nil); overload;static;
     class function SolveLeastSquares(const a: PT; const m, n, rwidtha: SizeInt; const b:PT; var x: PT):integer; overload;static;
     class function FitPloynomial(const m:SizeInt; degree: SizeInt; const x, y:PT; var b: PT):integer;static;
 
@@ -4517,82 +4522,10 @@ end; {slegls}
 
 class function TTensor<T>.FitPloynomial(const m: SizeInt; degree: SizeInt;
   const x, y: PT; var b: PT): integer;
-
-procedure ortpol(m, degree: SizeInt; const  x:PT; var alpha, beta: PT);
 var
   i, j : SizeInt;
-  xppn1, ppn1, ppn, p, alphaj, betaj : T;
-  pn, pn1 : TArray<T>;
-begin
-  setLength(pn, m);
-  setLength(pn1, m);
-  xppn1:=zero;
-  ppn1:=casti(m);
-  for i:=0 to m-1 do
-    begin
-      pn[i]  := zero;
-      pn1[i] := one;
-      xppn1  := xppn1 + x[i]
-    end;
-  alpha[0]:=division(xppn1, ppn1);
-  beta[0]:=zero;
-  for j:=1 to degree-1 do
-    begin
-      alphaj := alpha[j-1];
-      betaj := beta[j-1];
-      ppn   := ppn1;
-      ppn1  := zero;
-      xppn1 := zero;
-      for i:=0 to m-1 do
-        begin
-          p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
-          pn[i]  := pn1[i];
-          pn1[i] := p;
-          p      := sqr(p);
-          ppn1   := ppn1+p;
-          xppn1:=xppn1+x[i]*p
-        end;
-      alpha[j] := division(xppn1, ppn1);
-      beta[j]  := division(ppn1, ppn)
-    end;
-end;
-
-procedure ortcoe(m, degree: SizeInt; const x, y, alpha, beta:PT; var a: PT);
-var
-  i, j : SizeInt;
-  fpn, ppn, p, alphaj, betaj : T;
-  pn, pn1  : TArray<T>;
-
-begin
-  setLength(pn, m);
-  setLength(pn1, m);
-  fpn:=zero;
-  for i:=0 to m-1 do
-    begin
-      pn[i]:=0;
-      pn1[i]:=1;
-      fpn:=fpn+y[i]
-    end;
-  a[0] := division(fpn, m);
-  for j:=0 to degree-1 do
-    begin
-      fpn:=0; ppn:=0; alphaj:=alpha[j]; betaj:=beta[j];
-      for i:=0 to m-1 do
-        begin
-          p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
-          pn[i]  := pn1[i];
-          pn1[i] := p;
-          fpn    := fpn + y[i]*p;
-          ppn    := ppn + p*p
-        end;
-      a[j+1] := division(fpn , ppn)
-    end;
-end;
-
-var
-  i, j : SizeInt;
-  fsum  : T;
-  a, alpha, beta: TArray<T>;
+  fsum, fpn, ppn, ppn1, xppn1, p, alphaj, betaj  : T;
+  a, alpha, beta, pn, pn1: TArray<T>;
 begin
   if (degree<0) or (m<1) then begin
     exit(3);
@@ -4613,8 +4546,60 @@ begin
       setLength(alpha, degree);
       setLength(beta, degree);
       setLength(a, (degree+1));
-      ortpol(m, degree, x, pointer(alpha), pointer(beta));
-      ortcoe(m, degree, x, y, pointer(alpha), pointer(beta), pointer(a));
+      setLength(pn, m);
+      setLength(pn1, m);
+
+      xppn1:=zero;
+      ppn1:=casti(m);
+      for i:=0 to m-1 do
+        begin
+          pn[i]  := zero;
+          pn1[i] := one;
+          xppn1  := xppn1 + x[i]
+        end;
+      alpha[0]:=division(xppn1, ppn1);
+      beta[0]:=zero;
+      for j:=1 to degree-1 do
+        begin
+          alphaj := alpha[j-1];
+          betaj := beta[j-1];
+          ppn   := ppn1;
+          ppn1  := zero;
+          xppn1 := zero;
+          for i:=0 to m-1 do
+            begin
+              p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
+              pn[i]  := pn1[i];
+              pn1[i] := p;
+              p      := sqr(p);
+              ppn1   := ppn1+p;
+              xppn1:=xppn1+x[i]*p
+            end;
+          alpha[j] := division(xppn1, ppn1);
+          beta[j]  := division(ppn1, ppn)
+        end;
+
+      fpn:=zero;
+      for i:=0 to m-1 do
+        begin
+          pn[i]  := zero;
+          pn1[i] := one;
+          fpn    := fpn+y[i]
+        end;
+      a[0] := division(fpn, m);
+      for j:=0 to degree-1 do
+        begin
+          fpn:=0; ppn:=0; alphaj:=alpha[j]; betaj:=beta[j];
+          for i:=0 to m-1 do
+            begin
+              p      := (x[i]-alphaj) * pn1[i] - betaj*pn[i];
+              pn[i]  := pn1[i];
+              pn1[i] := p;
+              fpn    := fpn + y[i]*p;
+              ppn    := ppn + p*p
+            end;
+          a[j+1] := division(fpn , ppn)
+        end;
 
       move(a[0], b[0], (degree+1)*sizeof(T));
       for i:=0 to degree-1 do
@@ -5080,12 +5065,12 @@ begin
 {$elseif defined(FPC)}
   bmp := TFPMemoryImage.Create(w(), imgs*h());
   if aNormalize then begin
-    if not assigned(minmaxvss) then minmaxvss := minMax;
+    if not assigned(minmaxvsi) then minmaxvsi := minMax;
   end;
   _area := area();
   for c :=f to t do begin
     if aNormalize then begin
-      minmaxvss(_area, @data[c*_area], 1, aMin, aMax, argMin, argMax);
+      minmaxvsi(_area, @data[c*_area], 1, aMin, aMax, argMin, argMax);
       denom := minus(aMax, aMin);
     end;
     if aNormalize and (denom=0) then
@@ -6084,9 +6069,9 @@ var N, i :SizeInt;
   armin, armax :SizeInt;
 begin
   N := groupSize();
-  if not assigned(minmaxvss) then minmaxvss := minMax;
+  if not assigned(minmaxvsi) then minmaxvsi := minMax;
   for i:=0 to Groups-1 do begin
-    minmaxvss(N, Data + i*N, 1, amin, amax, arMin, arMax);
+    minmaxvsi(N, Data + i*N, 1, amin, amax, arMin, arMax);
     dnom := division(aScale, minus(amax, amin));
     amin := minus(zero, aMin);
     addvs(N, amin, Data + i*N, 1, Data + i*N, 1);
@@ -6573,6 +6558,22 @@ begin
   end
 end;
 
+class procedure TTensor<T>.minMax(const N: SizeInt; const src: PT;
+  const stride: SizeInt; var outMin, outMax: T);
+var i: SizeInt;
+begin
+  //if not assigned(compare) then compare := _compare;
+  if N=0 then exit;
+  outMin := src[0];
+  outMax := outMin;
+  for i:=1 to N-1 do begin
+    if compare(src[i*stride], outMax)>0 then
+      outMax := src[i*stride];
+    if compare(src[i*stride], outMin)<0 then
+      outMin := src[i*stride];
+  end
+end;
+
 class function TTensor<T>.argMin(const N: SizeInt; const src: PT; const stride: SizeInt): SizeInt;
 var
   i: SizeInt;
@@ -6950,8 +6951,8 @@ end;
 
 procedure TTensor<T>.minMax(var outMin, outMax: T; var outArgMin, outArgMax : SizeInt; const stride: SizeInt);
 begin
-  if not assigned(minmaxvss) then minmaxvss := minMax;
-  minmaxvss(Size(), Data, stride, outMin, outMax, outArgMin, outArgMax)
+  if not assigned(minmaxvsi) then minmaxvsi := minMax;
+  minmaxvsi(Size(), Data, stride, outMin, outMax, outArgMin, outArgMax)
 end;
 
 procedure TTensor<T>.sin(const dst: PT; const stride: SizeInt; const dstStride: SizeInt);
@@ -7284,6 +7285,18 @@ begin
     if data[i]=src then inc(result)
 end;
 
+procedure TTensor<T>.histogram(const aCount: SizeInt; var dst: PInteger;
+  outMin: PT; outMax: PT);
+var i:SizeInt;
+begin
+  if assigned(outMin) and assigned(outMax) then
+    for i:=0 to groups-1 do
+      histogram(groupSize(), data + i*groupSize(), aCount, dst + i*aCount, outMin+i , outMax+i)
+  else
+    for i:=0 to groups-1 do
+      histogram(groupSize(), data + i*groupSize(), aCount, dst + i*aCount, nil , nil)
+end;
+
 function ftos(f:double; prec:integer=0):string;
 begin
   str(f:1:prec, result)
@@ -7334,7 +7347,7 @@ const
   prec = 0.001;
 
 const
-  colors : array[0..3] of longword =($ffcc00, $ff00ff, $0088ff, $ffff00);
+  colors : array[0..4] of longword =($ffcc00, $0088ff, $ff00ff, $0088ff, $ffff00);
   dots :array[0..255] of string = (
            ' ','⠁','⠂','⠃','⠄','⠅','⠆','⠇','⡀','⡁','⡂','⡃','⡄','⡅','⡆','⡇'
           ,'⠈','⠉','⠊','⠋','⠌','⠍','⠎','⠏','⡈','⡉','⡊','⡋','⡌','⡍','⡎','⡏'
@@ -8318,6 +8331,33 @@ begin
   move(data[idx*groupSize()], dst^, groupSize()*SizeOf(T))
 end;
 
+class procedure TTensor<T>.histogram(const N: SizeInt; const src: PT;
+  const aCount: SizeInt; dst: PInteger; outMin: PT; outMax: PT);
+var i, j: SizeInt;
+    //arr:TArray<SizeInt>;
+    minVal, Val:T;
+    range, interval : double;
+begin
+  if not assigned(minmaxvss) then minmaxvss := minmax;
+  assert(dst<>nil,'[histogram] : [dst] is nil!');
+  minMaxvss(N, src, 1, minVal, val);
+  if assigned(outMin) then outMin^:=minVal;
+  if assigned(outMax) then outMax^:=val;
+  if minVal = val then exit;
+  val := minus(val, minVal); // rangle
+  vcvtd(1, @val, @interval);
+  interval := interval / aCount;
+  //setLength(arr, aCount);
+  for i:=0 to N-1 do begin
+    val := minus(src[i], minVal);
+    vcvtd(1, @val, @range);
+    j := math.floor(range / interval);
+    if j=aCount then
+      j:=aCount-1;
+    inc(dst[j])
+  end;
+end;
+
 
 class operator TTensor<T>.Implicit(arr: TArray<T>): TTensor<T>;
 begin
@@ -8877,10 +8917,8 @@ initialization
   TTensor<Int64>.shlvs            := @_shl;
   TTensor<byte>.shlvs             := @_shl;
   TTensor<ShortInt>.shlvs         := @_shl;
-  TTensor<Single>.dotvv           := @cblas_sdot;
-  TTensor<Double>.dotvv           := @cblas_ddot;
 
-{$if defined(USE_OPENBLAS)}
+{$if defined(USE_OPENBLAS) or defined(DARWIN)}
   TTensor<Single>.gemm            := @openblas.cblas_sgemm;
   TTensor<Double>.gemm            := @openblas.cblas_dgemm;
   TTensor<Single>.axpysvv         := @openblas.cblas_saxpy;
@@ -8905,18 +8943,22 @@ initialization
   TTensor<Double>.asumv           := @mkl.cblas_dasum;
   TTensor<Single>.mulvs           := @mkl.cblas_sscal;
   TTensor<Double>.mulvs           := @mkl.cblas_dscal;
+  TTensor<Single>.dotvv           := @mkl.cblas_sdot;
+  TTensor<Double>.dotvv           := @mkl.cblas_ddot;
+
   //TTensor<Single>.argmaxabsv      := @mkl.cblas_isamax;
   //TTensor<Double>.argmaxabsv      := @mkl.cblas_idamax;
   //TTensor<Single>.argminabsv      := @mkl.cblas_isamin;
   //TTensor<Double>.argminabsv      := @mkl.cblas_idamin;
 {$else}
+  TTensor<Single>.gemm            := @cblas_sgemm;
+  TTensor<Double>.gemm            := @cblas_dgemm;
   TTensor<Single>.axpysvv         := @cblas_saxpy;
   TTensor<Double>.axpysvv         := @cblas_daxpy;
   TTensor<Single>.mulvs           := @cblas_sscal;
   TTensor<Double>.mulvs           := @cblas_dscal;
-  TTensor<Single>.gemm            := @cblas_sgemm;
-  TTensor<Double>.gemm            := @cblas_dgemm;
-
+  TTensor<Single>.dotvv           := @cblas_sdot;
+  TTensor<Double>.dotvv           := @cblas_ddot;
 
 
 {$endif}
@@ -8939,8 +8981,7 @@ initialization
     ocl := TOpenCL.Create(dtALL);
     ocl.ActivePlatformId := 0;
     ocl.ActiveDeviceId := 0;
-    writeln({$UnitPath});
-    ocl.LoadFromFile(GetCurrentDir + '\..\..\..\cl_sgemm.c');
+    ocl.LoadFromFile(GetCurrentDir + '/../../../../NN/source/cl_sgemm.c');
     ocl.Build();
     if (ocl.BuildLog<>'') or not ocl.isBuilt then begin
       writeln(ocl.BuildLog);
