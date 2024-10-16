@@ -43,7 +43,7 @@ uses Classes, SysUtils, TypInfo, Generics.Defaults, syncobjs, Math
 {$if defined(USE_MKL)}
   , mkl_vml
   , mkl_cblas
-{$elseif defined(USE_OPENBLAS)}
+{$elseif defined(USE_OPENBLAS) or defined(DARWIN)}
   , openblas
 {$endif}
 {$ifdef USE_OPENCL}
