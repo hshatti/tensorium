@@ -97,14 +97,19 @@ procedure TConnectedLayer.forward(var state: TNNetState);
 var
     i: SizeInt;
 begin
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.forward.start(layerType);
-    {$endif}
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.start(layerType);
+  {$endif}
 
-    //fill_cpu(l.outputs * l.batch, 0, l.output, 1);
-    output.fill(0);
+  output.fill(0);
 
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+  {$endif}
     TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, batch, outputs, inputs, 1, state.input, inputs, weights, inputs, 1, output, outputs);
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+  {$endif}
     //state.input.matMul(weights, output, CblasNoTrans, CblasTrans);
 
     if isBatchNormalized and (batch > 1) then begin

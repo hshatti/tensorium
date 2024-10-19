@@ -8,10 +8,9 @@ uses
   cthreads,
   {$ENDIF}
   SysUtils, math, ntensors, ntypes, nDatasets, nBaseLayer, nConnectedlayer,
-  nLogisticLayer, nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer,
+  nLogisticLayer, nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer, nUpSampleLayer, nAddLayer,
   nModels, Keyboard, nparser
-  , OpenCL, OpenCLHelper
-  , ShellApi
+  {$ifdef MSWINDOWS}, ShellApi, clblast {$endif}
   { you can add units after this };
 
 
@@ -418,19 +417,19 @@ const thresh = 0.5;
     N = 20;
     K =30;
 var
-  ocl  : TOpenCL;
+  //ocl  : TOpenCL;
   a, b: TSingleTensor;
-  kernel : cl_kernel;
-  off, gws, lws : TArray<size_t>;
-  AA, BB, CC: cl_mem;
+  //kernel : cl_kernel;
+  off, gws, lws : TArray<SizeInt>;
+  //AA, BB, CC: cl_mem;
   NN ,R: Integer;
 
   conv : TConvolutionalLayer;
   state:TNNetState;
 
 begin
-  write(#$1B'[1J');
-
+  //write(#$1B'[1J');
+  TSingleTensor.computingDevice := cdOpenCL;
   img.loadFromFile(imageRoot+images[0]);
   a := img.toTensor();
 

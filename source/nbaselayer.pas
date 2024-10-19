@@ -95,8 +95,7 @@ type
     function getDelta():TImageData;
   end;
 
-  TMeasureOps = (opIncFill, opFill, opCopy, opNorm, opBatchAddvs, opAddvs, opBatchMulvs, opMulvs, opAxpy, opMulvv, opAddvv, opDot, opBatchFma, opFma, opGemm, opIm2col, opCol2im, opIm2ColExt, opCol2ImExt);
-
+{$ifdef USE_TELEMETRY}
   { TMetrics }
 
   TMetrics = record
@@ -131,34 +130,20 @@ type
           property Item[i:TLayerType]:int64 read GetItem ;default;
        end;
 
-       { TOps }
-
-       TOps = record
-       private
-          m:array[0..999] of int64;
-          stack: longint;
-          function GetItem(i: TMeasureOps): int64;
-       public
-
-          all: array[low(TMeasureOps)..high(TMeasureOps)] of int64;
-          procedure start(const a:TMeasureOps);
-          procedure finish(const a:TMeasureOps);
-          function total():int64;
-          property Item[i:TMeasureOps]:int64 read GetItem ;default;
-        end;
     public
 
-      ops: TOps;
+      ops: PTensorMetrics;
       act, grad : TAct;
       forward, backward, update:TFw;
       procedure reset;
       function print:string;
   end;
+{$endif}
 
+{$ifdef USE_TELEMETRY}
 var
-   metrics : TMetrics;
-   benchmark : boolean;
-
+  metrics : TMetrics;
+{$endif}
 
 
 implementation
@@ -349,11 +334,13 @@ begin
   Move(delta.Data[0], result.Data[0], length(result.Data)*SizeOf(Single))
 end;
 
+{$ifdef USE_TELEMETRY}
 { TMetrics }
 
 procedure TMetrics.reset;
 begin
-  fillchar(PAnsiChar(@ops.all)[0], sizeOf(ops.all), #0);
+  if assigned(ops) then
+    fillchar(PAnsiChar(@ops.all)[0], sizeOf(ops.all), #0);
   fillchar(PAnsiChar(@act.all)[0], sizeOf(act.all), #0);
   fillchar(PAnsiChar(@grad.all)[0], sizeOf(grad.all), #0);
   fillchar(PAnsiChar(@forward.all)[0], sizeOf(forward.all), #0);
@@ -447,34 +434,12 @@ begin
   for i:=low(TLayerType) to high(TLayerType) do
     inc(result, all[i])
 end;
+{$endif USE_TELEMETRY}
+initialization
 
-{ TMetrics.TOps }
-
-function TMetrics.TOps.GetItem(i: TMeasureOps): int64;
-begin
-  result := all[i]
-end;
-
-procedure TMetrics.TOps.start(const a: TMeasureOps);
-begin
-  m[stack]:=clock;
-  inc(stack)
-end;
-
-procedure TMetrics.TOps.finish(const a: TMeasureOps);
-begin
-  dec(stack);
-  all[a] := all[a] + clock()- m[stack]
-end;
-
-function TMetrics.TOps.total(): int64;
-var
-  i: TMeasureOps;
-begin
-  result := 0;
-  for i:=low(TMeasureOps) to high(TMeasureOps) do
-    inc(result, all[i])
-end;
+{$ifdef USE_TELEMETRY}
+  metrics.ops := @tensorMetrics;
+{$endif}
 
 end.
 

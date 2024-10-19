@@ -43,14 +43,19 @@ uses Classes, SysUtils, TypInfo, Generics.Defaults, syncobjs, Math
 {$if defined(USE_MKL)}
   , mkl_vml
   , mkl_cblas
-{$elseif defined(USE_OPENBLAS) or defined(DARWIN)}
+{$endif}
+{$if defined(USE_OPENBLAS)}
   , openblas
 {$endif}
 {$ifdef USE_OPENCL}
   , OpenCL
   , OpenCLHelper
+  , clblast
 {$endif}
-  ;
+{$ifdef USE_TELEMETRY}
+  , nChrono
+{$endif}
+;
 
 
 const
@@ -103,6 +108,7 @@ type
   type PInt32 = PInteger;
   {$endif}
 type
+  PPSingle = ^PSingle;
   PSizeInt = ^SizeInt;
   SizeInt  = NativeInt;
   SizeUInt = NativeUInt;
@@ -137,11 +143,30 @@ const
   psColor = psColor24;
 
 type
-  {$ifndef FPC}
+{$ifndef FPC}
   {$ifndef USE_MULTITHREADING}
   TThreadProcNested = reference to procedure (idx :IntPtr; ptr:pointer) ;
   {$endif}
-  {$endif}
+{$endif}
+
+{$ifdef USE_TELEMETRY}
+  TMeasureOps = (opIncFill, opFill, opCopy, opNorm, opBatchAddvs, opAddvs, opBatchMulvs, opMulvs, opAxpy, opMulvv, opAddvv, opDot, opBatchFma, opFma, opGemm, opIm2col, opCol2im, opIm2ColExt, opCol2ImExt);
+
+  { TTensorOps }
+  PTensorMetrics = ^TTensorMetrics;
+  TTensorMetrics = record
+  private
+     m:array[0..999] of int64;
+     stack: longint;
+     function GetItem(i: TMeasureOps): int64;
+  public
+     all: array[low(TMeasureOps)..high(TMeasureOps)] of int64;
+     procedure start(const a:TMeasureOps);
+     procedure finish(const a:TMeasureOps);
+     function total():int64;
+     property Item[i:TMeasureOps]:int64 read GetItem ;default;
+   end;
+{$endif}
 
   { TTensor }
   TTensor<T>=record
@@ -168,6 +193,10 @@ type
     TBinaryVecOp  = procedure (const N:SizeInt; const src1:PT; const src1Stride: SizeInt; const src2:PT; const src2Stride:SizeInt; const dst:PT; const dstStride:SizeInt);
 
   private class var
+    workspace : TArray<T>;
+    {$ifdef USE_OPENCL}
+    devWorkspace : cl_mem;
+    {$endif}
     Plus, Minus, Times, Division    : TBinaryFunc;
     sqr, sqrt, exp, log, __abs : TUnaryFunc;
     CastI :TCastIOp;
@@ -215,6 +244,7 @@ type
     rand: function(const a:T):T;
     randG: function(const aMean,aStdDev:T):T;
   public class var
+    computingDevice : TComputingDevice;
     Zero, One:T;
     sqrv : TUnaryVecOp;
     powv, lognv : TUnaryVecOp2;
@@ -246,7 +276,6 @@ type
     FDimSizes:TSizes;
     FStrides: TSizes;
     lastOP : TComputingDevice;
-    computingDevice : TComputingDevice;
   private
     function GetDimensions: SizeInt;
     function GetGroup(idx: SizeInt): TTensor<T>; overload;
@@ -827,7 +856,43 @@ var
   ocl    : TOpenCL;
 {$endif}
 
+{$ifdef USE_TELEMETRY}
+var
+  tensorMetrics : TTensorMetrics;
+  benchmark : boolean;
+{$endif}
+
 implementation
+
+{$ifdef USE_TELEMETRY}
+{ TTensorMetric }
+
+function TTensorMetrics.GetItem(i: TMeasureOps): int64;
+begin
+  result := all[i]
+end;
+
+procedure TTensorMetrics.start(const a: TMeasureOps);
+begin
+  m[stack]:=clock;
+  inc(stack)
+end;
+
+procedure TTensorMetrics.finish(const a: TMeasureOps);
+begin
+  dec(stack);
+  all[a] := all[a] + clock()- m[stack]
+end;
+
+function TTensorMetrics.total(): int64;
+var
+  i: TMeasureOps;
+begin
+  result := 0;
+  for i:=low(TMeasureOps) to high(TMeasureOps) do
+    inc(result, all[i])
+end;
+{$endif}
 
 {$ifdef FILLD_IMPL}
 procedure FillDWord(var x; const count:SizeInt; const value:LongWord);
@@ -4616,9 +4681,10 @@ var sz:SizeInt;
 begin
   //sz:=product(newShape)*Sizeof(T);
   //Self.Data:=AllocMem(sz);
+  sz := product(newShape);
+  if sz =0 then exit;
   groups :=0;
   reshape(newShape,aGroups);
-  sz := product(newShape);
   setLength(DynData, sz);
   Data := Pointer(DynData);
 
@@ -4660,18 +4726,24 @@ end;
 
 {$endif}
 procedure TTensor<T>.pushToDevice;
+var sz : SizeInt;
 begin
 {$if defined(USE_OPENCL)}
-   clEnqueueWriteBuffer(ocl.ActiveQueue, devData, cl_true, 0, byteSize(), Data, 0, nil, nil);
+   sz := byteSize();
+   ocl.FErr := clEnqueueWriteBuffer(ocl.ActiveQueue, devData, cl_true, 0, sz, Data, 0, nil, nil);
+   ocl.CheckError();
    lastOP := cdOpenCL;
 {$endif}
 end;
 
 procedure TTensor<T>.pullFromDevice;
+var sz : SizeInt;
 begin
 {$if defined(USE_OPENCL)}
-  clEnqueueReadBuffer(ocl.ActiveQueue, devData, cl_true, 0, byteSize(), Data, 0, nil, nil);
-  lastOP := cdOpenCL;
+  sz := byteSize();
+  ocl.FErr := clEnqueueReadBuffer(ocl.ActiveQueue, devData, cl_true, 0, sz, Data, 0, nil, nil);
+  ocl.CheckError();
+  lastOP := cdCPU;
 {$endif}
 end;
 
@@ -4684,6 +4756,10 @@ procedure TTensor<T>.Fill(const val: T; const interval: T;
   const stride: SizeInt; start: SizeInt; count: SizeInt);
 var i:SizeInt;
 begin
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opIncFill);
+{$endif}
+
   assert(stride>0);
   i:=0;
   if (count < 0) or (count + start > Size()) then count := Size() - start;
@@ -4694,11 +4770,17 @@ begin
        Data[start + i]:=Plus(val , Times(CastI(i) , interval));
        inc(i,stride)
     end;
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opIncFill);
+  {$endif}
 end;
 
 procedure TTensor<T>.Fill(const val: T);
 var i:SizeInt;
 begin
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opFill);
+{$endif}
   case sizeOf(T) of
     1: FillChar(data[0], Size(), PAnsiChar(@val)^);
     2: FillWord(data[0], Size(), PWord(@val)^);
@@ -4707,7 +4789,10 @@ begin
   else
     for i:=0 to Size()-1 do
       Data[i] := val
-  end
+  end  ;
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opFill);
+{$endif}
 end;
 
 procedure TTensor<T>.linSpace(const start: T; const Finish: T; const N: SizeInt
@@ -4791,7 +4876,7 @@ begin
   Data := pointer(DynData);
 {$if defined(USE_OPENCL)}
   if computingDevice=cdOpenCL then begin
-    ocl.freeDeviceBuffer(devData);
+    if assigned(devData) then ocl.freeDeviceBuffer(devData);
     devData := ocl.createDeviceBuffer(SN*SizeOf(T));
   end;
 {$endif}
@@ -5246,7 +5331,9 @@ var
   D1, D2 : PT;
   dstBatch : boolean;
 begin
-  sd := Size(); sc := src.size;
+  {$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opAddvv);
+  {$endif}  sd := Size(); sc := src.size;
   if sd = sc then begin
     addvv(Size(), Data, 1, src.Data, 1, Data, 1);
     exit;
@@ -5288,6 +5375,9 @@ begin
       sum := Plus(sum , sumv(blockSize, src.data + (j*N + i)*blockSize, 1));
     Data[i] := Plus(Data[i] , sum)
   end;
+  {$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opAddvv);
+  {$endif}
 end;
 
 procedure TTensor<T>.Subtract(const src: TTensor<T>);
@@ -5645,6 +5735,10 @@ begin
   //   [...]      [...]      [...]
   // M [.A.]  X K [.B.] => M [.C.]
   //   [...]      [...]      [...]
+
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opGemm);
+{$endif}
   assert((mat.Dimensions<3), 'Tensors must have two dimensions');
 
   if transA=CblasTrans then begin
@@ -5703,12 +5797,20 @@ begin
            dstMat.Data + b*cSize,  ldc
     ) ;
   end;
+
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opGemm);
+{$endif}
 end;
 
 function TTensor<T>.matMul(const mat: TTensor<T>;
   const transA: CBLAS_TRANSPOSE; transB: CBLAS_TRANSPOSE): TTensor<T>;
 var M, N, K, lda, ldb, ldc: SizeInt;
 begin
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opGemm);
+{$endif}
+
   assert(mat.dimensions<=2, '[matMul] matrix [b] must have one or two dimensions.');
   if transA=CblasTrans then begin
     M := w;
@@ -5732,8 +5834,10 @@ begin
     result.resize([M])
   else
     result.resize([M, N]);
-  matMul(mat, result, transA, transB)
-
+  matMul(mat, result, transA, transB);
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opGemm);
+{$endif}
 end;
 
 function TTensor<T>.matDeterminant: T;
@@ -5809,41 +5913,13 @@ end;
 procedure TTensor<T>.Conv2D(const AKernels, dst: TTensor<T>; wPadding: SizeInt; hPadding: SizeInt; xStride: SizeInt; yStride: SizeInt; xDilation: SizeInt; yDilation: SizeInt);
 
 var kSize : SizeInt;
-
-//procedure _conv2d(const src:PT; ker:PT; var dest:PT; const wSrc, hSrc, wKernel, hKernel, wPad, hPad, xStr, yStr, xDil, yDil:SizeInt);
-//var
-//  {kx, kw, }ky {,kh}, wp, hp, wDst, hDst, i, j: SizeInt;
-//  ker2, srcIM, dstIM:PT;
-//  acc:T;
-//begin
-//  if not assigned(dotvv) then dotvv := dot;
-//  //kw := wKernel div 2;
-//  //kh := hKernel div 2;
-//  //kSize := wKernel * hKernel;
-//  wDst := wSrc div xStr + wPad*2 - wKernel + 1;
-//  hDst := hSrc div yStr + hPad*2 - hKernel + 1;
-//  wP := {kw} - wPad;
-//  hP := {kh} - hPad;
-//  ker := ker {+ kh*wKernel}{ + kw};
-//  for i := hPad to hDst - hPad -1 do begin
-//    dstIM := dest + i*wDst;
-//    for j := wPad to wDst - wPad-1 do begin
-//      acc := dstIM[j];
-//      for ky := 0{-kh} to hKernel-1{kh} do begin
-//        srcIM := src + (i*yStr + ky*yDil)*wSrc + j*xStr + hP*wSrc + wp;
-//        ker2 := ker + ky*wKernel;
-//        acc := plus(acc , dotvv(wKernel, ker2, 1, srcIm, xDil));
-//        //for kx := 0{-kw} to wKernel-1{kw} do
-//        //  acc :=  plus(acc , ker2[kx]*srcIM[kx*xDil]);
-//      end;
-//      dstIM[j] := acc
-//    end;
-//  end
-//end;
-
-var filt, chan, b : SizeInt;
+  b, imColSize, k, filters, outImgSize : SizeInt;
   srcIm, dstIm, ker: PT;
-
+  mt:boolean;
+{$ifdef USE_OPENCL}
+  aOffset, bOffset : SizeInt;
+  _A, _B, _C: cl_mem;
+{$endif}
 begin
   assert((AKernels.dimensions>1) and (Dimensions>1) and (dst.dimensions>1));
   if wPadding <0 then
@@ -5853,17 +5929,90 @@ begin
   assert(w() div xStride + wPadding*2 - AKernels.w()+1 = dst.w());
   assert(h() div yStride + hPadding*2 - AKernels.h()+1 = dst.h());
   assert((AKernels.c() = dst.c()) and (AKernels.n()=c()));
-
   kSize := AKernels.area();
-  for b:=0 to groups-1 do
-    for filt:= 0 to AKernels.c() -1 do begin
-      dstIM := b * dst.groupSize() + dst.data + filt*dst.area();
-      for chan :=0 to AKernels.n()-1 do begin
-        srcIM := data + b * groupSize() + chan*area() ;
-        ker := AKernels.data + chan*AKernels.volume() + filt*AKernels.area();
-        _conv2d(srcIM, ker, dstIM, w(), h(),  aKernels.w(), aKernels.h(), wPadding, hPadding, xStride, yStride, xDilation, yDilation)
-      end;
+  outImgSize:= dst.area();
+  filters := AKernels.c();
+  k := c * kSize;
+  imColSize := c() * kSize * outImgSize;
+  if (kSize <> 1) or (xDilation*yDilation<>1) or (xStride*yStride<>1) and (length(workspace) < imColSize) then begin
+    setLength(workspace, imColSize);
+{$if defined(USE_OPENCL) and not defined(CLBLASTCONV)}
+    if assigned(devWorkspace) then
+      clReleaseMemObject(devWorkspace);
+    devWorkspace := clCreateBuffer(ocl.ActiveContext, CL_MEM_READ_ONLY, imColSize*SizeOf(T), nil, ocl.FErr);ocl.CheckError();
+{$endif}
+  end;
+
+{$if defined(USE_OPENCL)}
+  {$ifdef CLBLASTCONV}
+  if not wasGPU() then
+     pushToDevice;
+// todo remove comment below when tensor GPU ops is complete
+  //if not weights.wasGPU() then
+      AKernels.pushToDevice;
+  ocl.FErr := integer(CLBlastSconvgemm(CLBlastKernelModeCrossCorrelation, c, h, w, AKernels.h(), AKernels.w(), hPadding, wPadding, yStride, xStride, yDilation, xDilation, filters, groups, devData, 0, AKernels.devData, 0, dst.devData, 0, @ocl.ActiveQueue, nil)); ocl.CheckError();
+  dst.setOCL;
+  {$else}
+  if not wasGPU() then
+    pushToDevice;
+  //if not weights.wasGPU() then
+    AKernels.pushToDevice;
+  for b:=0 to groups -1 do begin
+    bOffset := 0;
+    if (kSize <> 1) or (xStride*yStride <> 1) or (xDilation*yDilation <> 1) then begin
+      _A := devData;
+      _B := devWorkspace;
+      aOffset :=  b*c*h*w;
+      bOffset := 0;
+      ocl.FErr := integer(CLBlastSim2col(CLBlastKernelModeCrossCorrelation, c, h, w, AKernels.h(), AKernels.w(), hPadding, wPadding, yStride, xStride, yDilation, xDilation, _A , aOffset, _B, 0, @ocl.ActiveQueue, nil)); ocl.CheckError();
+    end else begin
+      _B := devData;
+      bOffset := b*c*h*w
     end;
+
+    _C := dst.devData;
+    ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo, filters, outImgSize, k, 1, AKernels.devData, 0, k, _B, bOffset, outImgSize, 0, _C, b*outImgSize*filters, outImgSize, @ocl.ActiveQueue, nil)); ocl.CheckError();
+  end;
+  dst.setOCL;
+  {$endif CLBLASTCONV}
+  if dst.wasGPU then
+      dst.pullFromDevice;
+
+{$else}
+  mt := groups=1;
+  for b:=0 to groups-1 do begin
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opIm2col);
+  {$endif}
+    if (kSize <> 1) or (xDilation*yDilation<>1) or (xStride*yStride<>1) then begin
+      im2Colvv(c, h, w, AKernels.h, aKernels.w, hPadding, wPadding, yStride, xStride, xDilation, yDilation, data, b*volume(), pointer(workspace), 0, mt);
+      srcIm := pointer(workspace)
+    end else
+      srcIm := data + b*volume();
+    dstIM := dst.data + b*outImgSize*filters;
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opIm2col);
+  {$endif}
+
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+  {$endif}
+    gemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, filters, outImgSize, k, 1, AKernels.data, k, srcIM, outImgSize, 0, dstIM, outImgSize);
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+  {$endif}
+  end;
+{$endif}
+
+  //for b:=0 to groups-1 do
+  //  for filt:= 0 to AKernels.c() -1 do begin
+  //    dstIM := b * dst.groupSize() + dst.data + filt*dst.area();
+  //    for chan :=0 to AKernels.n()-1 do begin
+  //      srcIM := data + b * groupSize() + chan*area() ;
+  //      ker := AKernels.data + chan*AKernels.volume() + filt*AKernels.area();
+  //      _conv2d(srcIM, ker, dstIM, w(), h(),  aKernels.w(), aKernels.h(), wPadding, hPadding, xStride, yStride, xDilation, yDilation)
+  //    end;
+  //  end;
 
 end;
 
@@ -7601,9 +7750,9 @@ var
   l : longword;
   range, r, g, b, r2, g2, b2 : double;
   S: string;
-const __shade : array[0..4] of shortstring = (' ', '░','▒','▓','█');
+const __shade : array[0..4] of string = (' ', '░','▒','▓','█');
 
-      halfChar = '▀';
+      halfChar :string = '▀';
 begin
   if not assigned(Data) then exit;
   write(TypeName(), ' Tensor (');
@@ -8163,6 +8312,10 @@ end;
 
 var mt:boolean;
 begin
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opIm2col);
+{$endif}
+
   assert(assigned(im2colvv),'[Im2Col] not implementd!');
   ow := (w+2 * padWidth -(dilationX * (kernelWidth -1)+1)) div strideX+1;
   oh := (h+2 * padHeight-(dilationy * (kernelHeight-1)+1)) div stridey+1;
@@ -8181,11 +8334,14 @@ begin
     mp.&for(i2c, 0, groups, @mt)
   else
   for b:=0 to groups-1 do
-    i2c(b, @mt)
+    i2c(b, @mt);
 {$else}
   mt := false;
   for b:=0 to groups-1 do
-    i2c(b, @mt)
+    i2c(b, @mt);
+{$endif}
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opIm2col);
 {$endif}
 end;
 
@@ -8209,7 +8365,10 @@ end;
 var
   mt : boolean;
 begin
-  assert(assigned(im2colvv),'[Col2Im] not implementd!');
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opCol2im);
+{$endif}
+  assert(assigned(col2imvv),'[Col2Im] not implementd!');
   ow := (w+2 * padWidth -(dilationX * (kernelWidth -1)+1)) div strideX+1;
   oh := (h+2 * padHeight-(dilationy * (kernelHeight-1)+1)) div stridey+1;
   colSize := c*ow*oh*kernelWidth*kernelHeight;
@@ -8228,11 +8387,14 @@ begin
     mp.&for(c2i, 0, groups, @mt)
   else
   for b:=0 to groups-1 do
-    c2i(b, @mt)
+    c2i(b, @mt);
 {$else}
   mt := false;
   for b:=0 to groups-1 do
-    c2i(b, @mt)
+    c2i(b, @mt);
+{$endif}
+{$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opCol2im);
 {$endif}
 end;
 
@@ -8454,6 +8616,7 @@ begin
   dst.DynData := nil;
 {$if defined(USE_OPENCL)}
   dst.devData := nil;
+  dst.lastOp := cdCPU;
 {$endif}
   dst.groups := 0;
   //if assigned(plus) then exit;
@@ -8605,8 +8768,10 @@ begin
   dst.Data := nil;
 
 {$if defined(USE_OPENCL)}
-  if assigned(dst.devData) then
-    ocl.freeDeviceBuffer(dst.devData);
+  if assigned(dst.devData) then begin
+    //ocl.freeDeviceBuffer(dst.devData);
+    //dst.devData := nil;
+  end;
 {$endif}
 
   //if assigned(dst.Data) then
@@ -8823,7 +8988,20 @@ initialization
   TTensor<byte>.absdiffv          := @vAbsDiffI;
 
 
+{$ifdef USE_MKL}
+  TTensor<Single>.addvv           := @mkl_vml.vsAddI;
+  TTensor<Double>.addvv           := @mkl_vml.vdAddI;
 
+  TTensor<Single>.subvv           := @mkl_vml.vsSubI;
+  TTensor<Double>.subvv           := @mkl_vml.vdSubI;
+
+  TTensor<Single>.mulvv           := @mkl_vml.vsMulI;
+  TTensor<Double>.mulvv           := @mkl_vml.vdMulI;
+
+  TTensor<Single>.divvv           := @mkl_vml.vsDivI;
+  TTensor<Double>.divvv           := @mkl_vml.vdDivI;
+
+{$else}
   TTensor<Single>.addvv           := @vsAddI;
   TTensor<Double>.addvv           := @vdAddI;
 
@@ -8836,6 +9014,7 @@ initialization
   TTensor<Single>.divvv           := @vsDivI;
   TTensor<Double>.divvv           := @vdDivI;
 
+{$endif}
   TTensor<Single>.addblkvv        := @vsAddB;
   TTensor<Double>.addblkvv        := @vdAddB;
 
@@ -8918,7 +9097,7 @@ initialization
   TTensor<byte>.shlvs             := @_shl;
   TTensor<ShortInt>.shlvs         := @_shl;
 
-{$if defined(USE_OPENBLAS) or defined(DARWIN)}
+{$if defined(USE_OPENBLAS)}
   TTensor<Single>.gemm            := @openblas.cblas_sgemm;
   TTensor<Double>.gemm            := @openblas.cblas_dgemm;
   TTensor<Single>.axpysvv         := @openblas.cblas_saxpy;
@@ -8935,21 +9114,24 @@ initialization
   //TTensor<Single>.argminAbsv      := @openblas.cblas_isamin;
   //TTensor<Double>.argminAbsv      := @openblas.cblas_idamin;
 {$elseif defined(USE_MKL)}
-  TTensor<Single>.gemm            := @mkl.cblas_sgemm;
-  TTensor<Double>.gemm            := @mkl.cblas_dgemm;
-  TTensor<Single>.axpysvv         := @mkl.cblas_saxpy;
-  TTensor<Double>.axpysvv         := @mkl.cblas_daxpy;
-  TTensor<Single>.asumv           := @mkl.cblas_sasum;
-  TTensor<Double>.asumv           := @mkl.cblas_dasum;
-  TTensor<Single>.mulvs           := @mkl.cblas_sscal;
-  TTensor<Double>.mulvs           := @mkl.cblas_dscal;
-  TTensor<Single>.dotvv           := @mkl.cblas_sdot;
-  TTensor<Double>.dotvv           := @mkl.cblas_ddot;
+  TTensor<Single>.gemm            := @mkl_cblas.cblas_sgemm;
+  TTensor<Double>.gemm            := @mkl_cblas.cblas_dgemm;
+  TTensor<Single>.axpysvv         := @mkl_cblas.cblas_saxpy;
+  TTensor<Double>.axpysvv         := @mkl_cblas.cblas_daxpy;
+  TTensor<Single>.asumv           := @mkl_cblas.cblas_sasum;
+  TTensor<Double>.asumv           := @mkl_cblas.cblas_dasum;
+  TTensor<Single>.mulvs           := @mkl_cblas.cblas_sscal;
+  TTensor<Double>.mulvs           := @mkl_cblas.cblas_dscal;
+  TTensor<Single>.dotvv           := @mkl_cblas.cblas_sdot;
+  TTensor<Double>.dotvv           := @mkl_cblas.cblas_ddot;
+  //TTensor<Single>.gemmBatch       := @mkl_cblas.cblas_sgemm_batch_strided;
+  //TTensor<Double>.gemmBatch       := @mkl_cblas.cblas_dgemm_batch_strided;
 
-  //TTensor<Single>.argmaxabsv      := @mkl.cblas_isamax;
-  //TTensor<Double>.argmaxabsv      := @mkl.cblas_idamax;
-  //TTensor<Single>.argminabsv      := @mkl.cblas_isamin;
-  //TTensor<Double>.argminabsv      := @mkl.cblas_idamin;
+
+  //TTensor<Single>.argmaxabsv      := @mkl_cblas.cblas_isamax;
+  //TTensor<Double>.argmaxabsv      := @mkl_cblas.cblas_idamax;
+  //TTensor<Single>.argminabsv      := @mkl_cblas.cblas_isamin;
+  //TTensor<Double>.argminabsv      := @mkl_cblas.cblas_idamin;
 {$else}
   TTensor<Single>.gemm            := @cblas_sgemm;
   TTensor<Double>.gemm            := @cblas_dgemm;
@@ -8979,16 +9161,16 @@ initialization
   end else
   begin
     ocl := TOpenCL.Create(dtALL);
-    ocl.ActivePlatformId := 0;
-    ocl.ActiveDeviceId := 0;
-    ocl.LoadFromFile(GetCurrentDir + '/../../../../NN/source/cl_sgemm.c');
-    ocl.Build();
-    if (ocl.BuildLog<>'') or not ocl.isBuilt then begin
-      writeln(ocl.BuildLog);
-      readln
-    end;
+    //ocl.ActivePlatformId := 0;
+    //ocl.ActiveDeviceId := 0;
+    //ocl.LoadFromFile(GetCurrentDir + '/../../../../NN/source/cl_sgemm.c');
+    //ocl.Build();
+    //if (ocl.BuildLog<>'') or not ocl.isBuilt then begin
+    //  writeln(ocl.BuildLog);
+    //  readln
+    //end;
 
-    ocl.ActiveKernelId:=0;
+    //ocl.ActiveKernelId:=0;
     writeln('Using :', ocl.DeviceName(ocl.ActiveKernelId));
     writeln(ocl.ActiveKernelInfo.KernelName);
     for i:=0 to ocl.ActiveKernelInfo.KernelArgCount-1 do

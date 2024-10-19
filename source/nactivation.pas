@@ -630,7 +630,7 @@ begin
 
         acRELU:
           for i := 0 to N-1 do
-              delta[i] := delta[i] * relu_gradient(x[i]);
+              delta[i] := delta[i] * ord(x[i]>0);//relu_gradient(x[i]);
 
         acRELU6:
           for i := 0 to N-1 do
@@ -777,6 +777,7 @@ begin
     activation_input  :=a.B;
     output            :=a.C;
 
+  // todo SIMDfy
     for i := f to t do
       begin
           x_val := x[i];
@@ -794,7 +795,6 @@ begin
   p.A:=x;
   p.B:=activation_input;
   p.C:=output;
-  // todo SIMDfy
   {$if defined(USE_MULTITHREADING)}
   mp2.&for(mishMP, 0, n-1,@p);
   {$else}

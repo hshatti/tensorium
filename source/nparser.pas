@@ -522,8 +522,8 @@ begin
           maxCounter := counters[i];
     end;
   end;
-
-  result.classesMultipliers := TSingleTensor.Create([length(counters)]);
+  if assigned(counters) then
+    result.classesMultipliers := TSingleTensor.Create([length(counters)]);
   for i:= 0 to Result.classesMultipliers.size()-1 do
     result.classesMultipliers.Data[i] := maxCounter / counters[i];
 

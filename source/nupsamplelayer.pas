@@ -85,7 +85,7 @@ begin
            for j := 0 to h*stride-1 do
                for i := 0 to w*stride-1 do begin
                    in_index := b*w*h*c + k*w*h + (j div stride)*w + i div stride;
-                   out_index := b*w*h*c*stride*stride + k*w*h*stride*stride + j*w*stride + i;
+                   out_index := b*c*h*w*stride*stride + k*h*w*stride*stride + j*w*stride + i;
                    if forward then
                      &out[out_index] := scale*&in[in_index]
                    else
@@ -115,7 +115,7 @@ begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.start(layerType);
   {$endif}
-  if reverse then  // todo [backward_upsample] why not passing l.reverse to the function instad of [if then else]
+  if reverse then  // todo [backward_upsample] why not passing l.reverse to the function instead of [if then else]
       upsample(delta, outW, outH, outC, batch, stride, true, scale, state.delta)
   else
       upsample(state.delta, w, h, c, batch, stride, false, scale, delta) ;

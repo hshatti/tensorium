@@ -31,7 +31,12 @@ var
 
 
 begin
-  write(#$1B'[1J');
+  //write(#$1B'[1J');
+{$ifdef USE_OPENCL}
+  TSingleTensor.computingDevice := cdOpenCL;
+  ocl.ActivePlatformId:=1;
+{$endif}
+
   CF10 := TCIFAR10Data.Create('');
 
   Neural:=TNNet.Create(leNetCIFAR10);

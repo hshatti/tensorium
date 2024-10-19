@@ -177,6 +177,50 @@ const
  *          Maintaining proper alignment is the user's responsibility.
  *}
 type
+
+  Pcl_char2    = ^cl_char2      ;
+  Pcl_char4    = ^cl_char4      ;
+  Pcl_char8    = ^cl_char8      ;
+  Pcl_char16   = ^cl_char16     ;
+  Pcl_uchar2   = ^cl_uchar2     ;
+  Pcl_uchar4   = ^cl_uchar4     ;
+  Pcl_uchar8   = ^cl_uchar8     ;
+  Pcl_uchar16  = ^cl_uchar16    ;
+  Pcl_short2   = ^cl_short2     ;
+  Pcl_short4   = ^cl_short4     ;
+  Pcl_short8   = ^cl_short8     ;
+  Pcl_short16  = ^cl_short16    ;
+  Pcl_ushort2  = ^cl_ushort2    ;
+  Pcl_ushort4  = ^cl_ushort4    ;
+  Pcl_ushort8  = ^cl_ushort8    ;
+  Pcl_ushort16 = ^cl_ushort16   ;
+  Pcl_int2     = ^cl_int2       ;
+  Pcl_int4     = ^cl_int4       ;
+  Pcl_int8     = ^cl_int8       ;
+  Pcl_int16    = ^cl_int16      ;
+  Pcl_uint2    = ^cl_uint2      ;
+  Pcl_uint4    = ^cl_uint4      ;
+  Pcl_uint8    = ^cl_uint8      ;
+  Pcl_uint16   = ^cl_uint16     ;
+  Pcl_long2    = ^cl_long2      ;
+  Pcl_long4    = ^cl_long4      ;
+  Pcl_long8    = ^cl_long8      ;
+  Pcl_long16   = ^cl_long16     ;
+  Pcl_ulong2   = ^cl_ulong2     ;
+  Pcl_ulong4   = ^cl_ulong4     ;
+  Pcl_ulong8   = ^cl_ulong8     ;
+  Pcl_ulong16  = ^cl_ulong16    ;
+  Pcl_float2   = ^cl_float2     ;
+  Pcl_float4   = ^cl_float4     ;
+  Pcl_float8   = ^cl_float8     ;
+  Pcl_float16  = ^cl_float16    ;
+  Pcl_double2  = ^cl_double2    ;
+  Pcl_double4  = ^cl_double4    ;
+  Pcl_double8  = ^cl_double8    ;
+  Pcl_double16 = ^cl_double16   ;
+
+
+
   cl_char2  = array [0..1] of int8;
   cl_char4  = array [0..3] of int8;
   cl_char8  = array [0..7] of int8;
@@ -1237,7 +1281,7 @@ begin
     CL_INVALID_BUFFER_SIZE : clErrorText:='CL_INVALID_BUFFER_SIZE';
     CL_INVALID_MIP_LEVEL : clErrorText:='CL_INVALID_MIP_LEVEL';
   else
-     clErrorText:='Unknown OpenCL error';
+     clErrorText:='Unknown OpenCL error ['+intToStr(err)+']';
   end;
 end;
 

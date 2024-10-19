@@ -6,7 +6,9 @@ unit nConvolutionLayer;
 interface
 
 uses
-  SysUtils, nTensors, nTypes, nBaseLayer, nCol2Im, nActivation;
+  SysUtils, nTensors, nTypes, nBaseLayer, nCol2Im, nActivation
+  {$ifdef MSWINDOWS)} , shellApi{$endif}
+  ;
 
 type
 
@@ -60,7 +62,7 @@ type
   end;
 
 implementation
-uses math, nnet, shellApi;
+uses math, nnet;
 
 { TBaseConvolutionalLayer }
 
@@ -107,7 +109,7 @@ end;
 
 function TBaseConvolutionalLayer.getWorkspaceSize: SizeInt;
 begin
-  result := batch * c * outH * outW * kernelSize * kernelSize {* sizeof(single)}
+  result := batch * c * outH * outW * kernelSize * kernelSize
 end;
 
 function TBaseConvolutionalLayer.getWorkspaceShape: TArray<SizeInt>;
@@ -439,43 +441,35 @@ end;
 
 procedure TConvolutionalLayer.forward(var state: TNNetState);
 var
-     i, j, m, k, nweights, outImgSize, imcolSize: SizeInt;
-    _A, _B, _C, im:Pointer;
     s: TNNetState;
-    i2c : TSingleTensor;
 begin
     {$ifdef USE_TELEMETRY}
     if benchmark then metrics.forward.start(layerType);
     {$endif}
 
+    ////output.fill(0);
+
+
     //outH := convolutional_out_height(l);
     //outW := convolutional_out_width(l);
     // todo TConvolutionalLayer : implement forward and backward groups and groupId for multi GPU
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.start(opFill);
-    {$endif}
-    output.fill(0);
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.finish(opFill);
-    {$endif}
-    //fill_cpu(l.outputs * l.batch, 0, l.output, 1);
-
-    m := filters div groups;
-    k := kernelSize * kernelSize * c div groups;
-    outImgSize := outH * outW;
-    imcolSize := getWorkspaceSize div batch;
-
+    //k := kernelSize * kernelSize * c div groups;
+    //outImgSize := outH * outW;
+    //imcolSize  := outImgSize * kernelSize * kernelSize * c ;
+    //m := filters div groups;
     //nweights := weights.size();
     //u := 0;
     //inc(u);
-
-
     //for i := 0 to batch -1 do
     //    for j := 0 to groups -1 do
     //    begin
     //        _A := weights.Data;
-    //        im := state.input.data +(i * groups + j) * (c div groups) * h * w;
+    //        im := state.input.data +(i * groups + j)*(c div groups) * h * w;
     //        _B := pointer(state.workspace.data + (i * groups + j)*(c div groups)*imcolSize);
+
+            //im := state.input.data + i * c * h * w + j * c * h * w div groups;
+            //_B := pointer(state.workspace.data + i*c*imcolSize + j*c*imcolSize div groups);
+
     //        _C := output.data + i * outImgSize * m;
     //        if (kernelSize = 1) and (stride = 1) and (dilation = 1) then
     //            _B := im
@@ -486,43 +480,13 @@ begin
 
     // todo [TConvolutionLayer] implement multi GPU grouos
 
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.start(opIm2Col);
-    {$endif}
-    if (kernelSize <> 1) or (stride <> 1) or (dilation <> 1) then
-          state.input.im2Col(kernelSize, kernelSize, padding*dilation, padding*dilation, stride_x, stride_y, dilation, dilation, state.workspace.Data, groups);
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.finish(opIm2col);
-    {$endif}
-
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.start(opGemm);
-    {$endif}
-    for i := 0 to batch -1 do begin
-      _A := weights.Data;
-      if (kernelSize = 1) and (stride = 1) and (dilation = 1) then
-          _B := state.input.data + i * c * h * w
-      else
-          _B := pointer(state.workspace.data + i*imcolSize);
-      _C := output.data + i * outImgSize * m;
-      TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, outImgSize, k, 1, _A, k, _B, outImgSize, 1, _C, outImgSize);
-    end;
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.ops.finish(opGemm);
-    {$endif}
+    state.input.Conv2D(weights, output, Padding, Padding, stride_x, stride_y, Dilation, Dilation);
 
     //state.input.conv2d(weights, output, Padding, padding, stride_x, stride_y, Dilation, Dilation) ;
     if isBatchNormalized then
       batchNorm(state)
-    else begin
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.start(opAddvv);
-      {$endif}
+    else
       output.Add(biases);
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.finish(opAddvv);
-      {$endif}
-    end;
 
     case ActivationType of
        acSWISH :
@@ -591,16 +555,9 @@ begin
       end;
       if isBatchNormalized then
           batchNormBack(state)
-      else begin
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.start(opAddvv);
-        {$endif}
-          //backward_bias(bias_updates, delta, batch, filters, k);
+      else
           bias_updates.Add(delta);
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.finish(opAddvv);
-        {$endif}
-      end;
+
       nweights := weights.size();
       //for i := 0 to batch -1 do
       //    for j := 0 to groups -1 do
@@ -629,44 +586,21 @@ begin
       //  im2col_cpu_ext(im, c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, _B);
       //  TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, _A, k, _B, k, 1, _C, n);
       //end;
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.start(opIm2col);
-      {$endif}
-      state.input.im2Col(kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, state.workspace.data);
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.finish(opIm2col);
-      {$endif}
 
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.start(opGemm);
-      {$endif}
+      state.input.im2Col(kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, state.workspace.data);
+
       for i:= 0 to batch -1 do
         TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, delta.data + i*m*k, k, state.workspace.data + i*ColSize, k, 1, weight_updates.data, n);
-      {$ifdef USE_TELEMETRY}
-      if benchmark then metrics.ops.finish(opGemm);
-      {$endif}
 
       if assigned(state.delta.data) then begin
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.start(opGemm);
-        {$endif}
         for i := 0 to batch -1 do begin
             _A := weights.Data;
             _B := delta.Data + i * m * k;
             _C := pointer(state.workspace.data + i*colSize);
             TSingleTensor.gemm(CblasRowMajor, CblasTrans, CblasNoTrans, n, k, m, 1, _A, n, _B, k, 0, _C, k);
         end;
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.finish(opGemm);
-        {$endif}
 
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.start(opCol2im);
-        {$endif}
         state.delta.col2Im(kernelSize, kernelSize, padding*Dilation, padding*Dilation, stride_x, stride_y, dilation, dilation, state.workspace.data);
-        {$ifdef USE_TELEMETRY}
-        if benchmark then metrics.ops.finish(opCol2im);
-        {$endif}
       end;
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(layerType);
@@ -711,6 +645,8 @@ begin
   if benchmark then metrics.update.finish(layerType);
   {$endif}
 end;
+
+initialization
 
 end.
 

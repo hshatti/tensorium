@@ -134,7 +134,6 @@ begin
   end;
   Layers := ALayers;
   workSpace.resize([wsSize]);
-  //setLength(workspace, wsSize);
 end;
 
 procedure TNNet.setTraining(const training: boolean);
