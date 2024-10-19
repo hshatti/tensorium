@@ -197,9 +197,9 @@ type
     procedure CallKernel(const Index: integer; const dst: PLongWord; const a, b: integer);  overload;
 
     procedure gemm(M, N, K:SizeInt; ALPHA:single;
-      A:PSingle; lda:SizeInt;
-      B:PSingle; ldb:SizeInt;
-      C:PSingle; ldc:SizeInt);
+      A:cl_mem; lda:SizeInt;
+      B:cl_mem; ldb:SizeInt;
+      C:cl_mem; ldc:SizeInt);
 
     class function Plaforms:cl_uint;static;
 
@@ -710,8 +710,8 @@ begin
 
 end;
 
-procedure TOpenCL.gemm(M, N, K: SizeInt; ALPHA: single; A: PSingle;
-  lda: SizeInt; B: PSingle; ldb: SizeInt; C: PSingle; ldc: SizeInt);
+procedure TOpenCL.gemm(M, N, K: SizeInt; ALPHA: single; A: cl_mem;
+  lda: SizeInt; B: cl_mem; ldb: SizeInt; C: cl_mem; ldc: SizeInt);
 var MM, KK, NN :SizeInt; kernelId:integer;
 begin
   //     K          N          N
@@ -754,21 +754,21 @@ begin
   FErr:=clSetKernelArg(FKernels[kernelId], 2, SizeOf(K)    , @K);CheckError();
   FErr:=clSetKernelArg(FKernels[kernelId], 3, SizeOf(ALPHA), @ALPHA);CheckError();
 
-  FCallParams[0] := clCreateBuffer(FContext,CL_MEM_READ_ONLY , M*lda*sizeOf(Single), nil ,FErr); CheckError();
-  FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[0], CL_FALSE, 0, M*lda*sizeOf(Single), A, 0,nil, nil); CheckError();
-  FErr:=clSetKernelArg(FKernels[kernelId], 4, SizeOf(cl_mem), @FCallParams[0]); CheckError();
+  //FCallParams[0] := clCreateBuffer(FContext,CL_MEM_READ_ONLY , M*lda*sizeOf(Single), nil ,FErr); CheckError();
+  //FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[0], CL_FALSE, 0, M*lda*sizeOf(Single), A, 0,nil, nil); CheckError();
+  FErr:=clSetKernelArg(FKernels[kernelId], 4, SizeOf(cl_mem), @A); CheckError();
 
   //FErr:=clSetKernelArg(FKernels[1], 5, SizeOf(lda), @lda); CheckError();
 
-  FCallParams[1]:=clCreateBuffer(FContext,CL_MEM_READ_ONLY , K*ldb*SizeOf(single), nil ,FErr); CheckError();
-  FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[1], CL_FALSE, 0,  K*ldb*SizeOf(single), B, 0,nil, nil); CheckError();
-  FErr:=clSetKernelArg(FKernels[kernelId], 5, SizeOf(cl_mem), @FCallParams[1]); CheckError();
+  //FCallParams[1]:=clCreateBuffer(FContext,CL_MEM_READ_ONLY , K*ldb*SizeOf(single), nil ,FErr); CheckError();
+  //FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[1], CL_FALSE, 0,  K*ldb*SizeOf(single), B, 0,nil, nil); CheckError();
+  FErr:=clSetKernelArg(FKernels[kernelId], 5, SizeOf(cl_mem), @B); CheckError();
 
   //FErr:=clSetKernelArg(FKernels[1], 7, SizeOf(ldb), @ldb); CheckError();
 
-  FCallParams[2]:=clCreateBuffer(FContext, CL_MEM_READ_WRITE, M*ldc*SizeOf(single), nil ,FErr); CheckError();
-  FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[2], CL_FALSE, 0, sizeOf(cl_mem), C, 0,nil, nil);CheckError();
-  FErr:=clSetKernelArg(FKernels[kernelId], 6, SizeOf(cl_mem), @FCallParams[2]); CheckError();
+  //FCallParams[2]:=clCreateBuffer(FContext, CL_MEM_READ_WRITE, M*ldc*SizeOf(single), nil ,FErr); CheckError();
+  //FErr:=clEnqueueWriteBuffer(FQueue, FCallParams[2], CL_FALSE, 0, sizeOf(cl_mem), C, 0,nil, nil);CheckError();
+  FErr:=clSetKernelArg(FKernels[kernelId], 6, SizeOf(cl_mem), @C); CheckError();
   //FErr:=clSetKernelArg(FKernels[1], 9, SizeOf(ldc), @ldc); CheckError();
 
 
@@ -776,11 +776,11 @@ begin
   FErr:=clEnqueueNDRangeKernel(FQueue, FKernels[kernelId] ,FWorkItemDimensions ,@FGlobalOffsets[0] , @FGlobalWorkGroupSizes[0] ,@FLocalWorkGroupSizes[0] ,0 ,nil ,nil ); CheckError();
   if FErr<>0 then
     writeln(' ',M,' X ', N);
-  FErr:=clEnqueueReadBuffer(FQueue, FCallParams[2], CL_FALSE, 0, M*N*sizeOf(single), C, 0, nil, nil);CheckError();
-  clFinish(FQueue);
-  FErr:=clReleaseMemObject(FCallParams[0]);CheckError();
-  FErr:=clReleaseMemObject(FCallParams[1]);CheckError();
-  FErr:=clReleaseMemObject(FCallParams[2]);CheckError();
+  //FErr:=clEnqueueReadBuffer(FQueue, FCallParams[2], CL_FALSE, 0, M*N*sizeOf(single), C, 0, nil, nil);CheckError();
+  //clFinish(FQueue);
+  //FErr:=clReleaseMemObject(FCallParams[0]);CheckError();
+  //FErr:=clReleaseMemObject(FCallParams[1]);CheckError();
+  //FErr:=clReleaseMemObject(FCallParams[2]);CheckError();
 
 end;
 
@@ -808,8 +808,7 @@ begin
     raise Exception.Create('Device index out of bounds!');
   wasBuilt:=FIsBuilt;
   CleanUp(true);
-  FQueue:=clCreateCommandQueue(FContext,FDevices[AValue],0, 0 (* QWord(@FErr) *) );
-  CheckError();
+  FQueue:=clCreateCommandQueue(FContext,FDevices[AValue],0, 0 (* QWord(@FErr) *) ); CheckError();
   FActiveDevice:=FDevices[AValue];
   FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_EXECUTION_CAPABILITIES,SizeOf(cl_device_exec_capabilities),@FExecCaps,N);CheckError();
   FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_GROUP_SIZE,SizeOf(FMaxWorkGroupSize),@FMaxWorkGroupSize,N);CheckError();

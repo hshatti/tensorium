@@ -222,7 +222,7 @@ begin
         weights.sums(pointer(weightSums), layers+1, softmax, pointer(weightMaxes));
       end;
   end;
-  if weights_normalization in [wnRELU_NORMALIZATION, wnSOFTMAX_NORMALIZATION] then
+  if weights_normalization <> wnNO_NORMALIZATION then
       for i:=0 to high(weightSums) do
         weightSums[i] := max(weightSums[i], sEPSILON);  // avoid division by zero
 
@@ -339,7 +339,8 @@ begin
         end;
     end;
 
-    for i :=0 to high(weightSums) do
+    if weights_normalization <> wnNO_NORMALIZATION then
+      for i :=0 to high(weightSums) do
         weightSums[i] := max(weightSums[i], sEPSILON);  // avoid division by zeros
 
     grad:=1;
