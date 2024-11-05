@@ -8,13 +8,17 @@ uses
   {$ENDIF}
   SysUtils, ntensors, ntypes, nDatasets, nBaseLayer, nConnectedlayer,
   nLogisticLayer, nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer,
-  nModels, Keyboard, nNormalizationLayer
-
+  nModels, Keyboard, nNormalizationLayer, steroids
+  {$if defined(MSWINDOWS)}
+  , ShellApi, cudnn_graph, cudnn_adv, cudnn_ops, cudnn_cnn
+  {$endif}
+  {$if defined(USE_OPENCL)}
+  {$endif}
   { you can add units after this };
 
 const
   READ_BATCH   : SizeInt = 32;
-  READ_MEASURE : SizeInt = 32;
+  READ_MEASURE : SizeInt = 8;
   READ_TEST    : SizeInt = 3;
 var
   Neural:TNNet;
@@ -26,17 +30,70 @@ var
   costDelta : single;
   s : clock_t;
   Predicted, Truth : TInt64Tensor;
-  output, sampled : TSingleTensor;
+  output  : PSingleTensor;
+  sampled : TSingleTensor;
   c : shortstring;
 
 
+procedure _conv2d(const src: PSingle; ker: PSingle; var dest: PSingle;
+  const wSrc, hSrc, wKernel, hKernel, wPad, hPad, xStr, yStr, xDil,
+  yDil: SizeInt);
+var
+  {kx, kw, }ky {,kh}, wp, hp, wDst, hDst, i, j: SizeInt;
+  ker2, srcIM, dstIM:PSingle;
+  acc:Single;
+begin
+
+  //kw := wKernel div 2;
+  //kh := hKernel div 2;
+  //kSize := wKernel * hKernel;
+  wDst := wSrc div xStr + wPad*2 - wKernel + 1;
+  hDst := hSrc div yStr + hPad*2 - hKernel + 1;
+  wP := {kw} - wPad;
+  hP := {kh} - hPad;
+  ker := ker {+ kh*wKernel}{ + kw};
+  for i := hPad to hDst - hPad -1 do begin
+    dstIM := dest + i*wDst;
+    for j := wPad to wDst - wPad-1 do begin
+      acc := dstIM[j];
+      for ky := 0{-kh} to hKernel-1{kh} do begin
+        srcIM := src + (i*yStr + ky*yDil)*wSrc + j*xStr + hP*wSrc + wp;
+        ker2 := ker + ky*wKernel;
+        acc := acc + cblas_sdot(wKernel, ker2, 1, srcIm, xDil);
+        //for kx := 0{-kw} to wKernel-1{kw} do
+        //  acc :=  plus(acc , ker2[kx]*srcIM[kx*xDil]);
+      end;
+      dstIM[j] := acc
+    end;
+  end
+end;
+
+var
+  img : TImageData;
+  coor : TArray<SizeInt>;
+  trainingHistory : TSingleTensor;
 begin
   //write(#$1B'[1J');
 {$ifdef USE_OPENCL}
-  TSingleTensor.computingDevice := cdOpenCL;
+  TSingleTensor.defaultDevice := cdOpenCL;
   ocl.ActivePlatformId:=1;
 {$endif}
+  sDigits := 0;
 
+  //sleep(500);
+  ////img.loadFromFile(['../../../../../data/dog.jpg', '../../../../../data/eagle.jpg'], 416, 416);
+  //////img.loadFromFile('../../../../../data/dog.jpg');
+  //t1.resize([4, 32, 32]);
+  //t1.Fill(0, 0.02);
+  //coor := t1.plot;
+  //write(#$1B'[',1+coor[0],'C', #$1B'[',1+coor[1],'A');
+  //t1.print(1);
+  ////
+  //readln;
+  //exit;
+  {$ifdef USE_TELEMETRY}
+  benchmark:=true;
+  {$endif}
   CF10 := TCIFAR10Data.Create('');
 
   Neural:=TNNet.Create(leNetCIFAR10);
@@ -58,6 +115,7 @@ begin
 
   i         := 0;
   j         := 0;
+  l         := 0;
   costDelta := 0;
   cost :=0 ;
   Randomize;
@@ -99,10 +157,13 @@ begin
       cost := cost / READ_MEASURE ;
       costDelta := costDelta - cost;
       s :=  READ_MEASURE * CLOCKS_PER_SEC div (clock - s);
+      inc(l);
+      trainingHistory.resize([l]);
+      trainingHistory.Data[l-1] := cost;
       write(#$1B'[1H');
       writeln('Batch [',j:4,'], epoch[',j*Neural.batch div CF10.DATA_COUNT:5,'], Cost [',cost:1:8,']',widechar($2191 +2*ord(costDelta>0)),' speed [', s*Neural.batch :5,'] Sample per second, '
-        ,'Accuracy [', 100*truth.similarity(predicted.Data):3:2,'%], learningRate [',Neural.computeCurrentLearningRate:1:3,']');
-
+        ,'Accuracy [', 100*truth.similarity(predicted.Data):3:2,'%], learningRate [',Neural.computeCurrentLearningRate:1:3,']', sLineBreak);
+      writeln('[gradients] SumAbsDiff : ', sumadiff);
       //writeln('Conv[1] ');
       //Neural.layers[0].weights.print(true, 18);
       //Neural.layers[0].biases.print(true);
@@ -116,11 +177,21 @@ begin
       //writeln(sLineBreak, 'truth:');
       //Sampled.print(psGray24);
 
-      writeln('Predicted:'#$1B'[0J');
-      output.print(psGray24);
-      writeln('Actual:');
-      sampled.print(psGray24);
+      //write('Predicted:',#$1B'[1J');
+      write('Predicted:',#$1B'[10D',#$1B'[B');
+      coor := output.print(psGray24);
+      write(#$1B'[',coor[1]+1,'A',#$1B'[',40,'C');
 
+      write('Actual:',#$1B'[7D',#$1B'[B');
+      coor := sampled.print(psGray24);
+      write(#$1B'[',coor[1]+1,'A',#$1B'[',40,'C');
+
+      coor := trainingHistory.plot;
+
+      write(#$1B'[',24,';',1,'H');
+      writeln(sLineBreak, metrics.print({TELEMETRY_OPS or }TELEMETRY_FWD or TELEMETRY_BWD or TELEMETRY_UPD));
+
+      metrics.reset;
       //writeln(sLineBreak, 'Predicted :');
       //Predicted.print();
       //writeln(sLineBreak, 'Truth :');
@@ -137,10 +208,9 @@ begin
       //  if c = 'b' then break;
       //end;
       //inc(i);
-      s := clock()
+      s := clock();
+      inc(k)
     end;
-
-
     inc(j);
   end;
   DoneKeyboard;

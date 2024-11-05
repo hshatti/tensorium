@@ -100,7 +100,7 @@ begin
   //pow_cpu(w * h * c * self.batch, -self.beta, self.norms, 1, self.output, 1);
   norms.power(-beta, output.data);
   //mul_cpu(w * h * c * self.batch, state.input, 1, self.output, 1);
-  output.Multiply(state.input);
+  output.Multiply(state.input^);
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.forward.finish(layerType);
   {$endif}

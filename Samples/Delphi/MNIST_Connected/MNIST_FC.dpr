@@ -7,7 +7,8 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  SysUtils{$ifdef MSWINDOWS}, windows{$endif}, ntensors, ntypes, nDatasets, nConnectedlayer, nLogisticLayer,
+  SysUtils{$ifdef MSWINDOWS}, windows{$endif}, ntensors
+   ,ntypes, nDatasets, nConnectedlayer, nLogisticLayer,
   nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer, nconcatlayer, nModels , Generics.Collections
   { you can add units after this };
 

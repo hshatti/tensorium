@@ -994,7 +994,7 @@ clGetKernelWorkGroupInfo : function (
   //  Event Object APIs
 clWaitForEvents : function (
   num_events  : cl_uint;
-  event_list  : cl_event
+  event_list  : pcl_event
   ): cl_int; winapi;
 
 

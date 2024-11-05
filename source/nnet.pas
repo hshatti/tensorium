@@ -8,7 +8,11 @@ interface
 uses
   SysUtils, Math, typInfo
   {$ifdef MSWINDOWS}, Windows{$endif}
-  , nTensors, nBaseLayer, NTypes, nYoloLayer;
+  , nTensors, nBaseLayer, NTypes, nYoloLayer
+  {$ifdef USE_OPENCL}
+  , opencl, OpenCLHelper
+  {$endif}
+  ;
 
 type
 
@@ -80,10 +84,10 @@ type
     procedure forward(var state: TNNetState); overload;
     procedure backward(var state: TNNetState); overload;
     procedure update(); overload;
-    function predict(const tensor: TSingleTensor): TSingleTensor;
+    function predict(const tensor: TSingleTensor): PSingleTensor;
     function Propagate( AInput, ATruth: PSingle): single;
     function trainEpoch(const Data: TData;  const randomSample: boolean = False ; batchCount: SizeInt = 0): single;
-    function output(): TSingleTensor;
+    function output(): PSingleTensor;
     function cost(): single;
     function classCount(): SizeInt;
     function Detections(const aWidth, aHeight: SizeInt; const aThresh: single = 0.5; const aBatch: SizeInt=0): TDetections;
@@ -261,30 +265,53 @@ procedure TNNet.forward(var state: TNNetState);
 var
   i: SizeInt;
   currentLayer: TBaseLayer;
-
+  {$ifdef USE_OPENCL}
+  ev : cl_event;
+  {$endif}
 begin
   state.workspace := workspace;
   for i := 0 to High(Layers) do
   begin
     state.index := i;
     currentLayer := layers[i];
-    if state.isTraining and assigned(currentLayer.delta.Data) and currentLayer.train then
+    if state.isTraining and assigned(currentLayer.delta.Data) and currentLayer.train then begin
       //currentLayer.delta.Multiply(0);
+    {$ifdef USE_OPENCL}
+      ocl.fill(currentLayer.delta.size(), currentLayer.delta.devData, 0, 1, 0, nil, @ev);
+      //ocl.waitForEvents(1, @ev);
+    {$else}
       currentLayer.delta.fill(0);
-    currentLayer.forward(state);
+    {$endif}
+    end;
     if assigned(OnForward) then OnForward(state);
-    state.input := currentLayer.output;
+
+    {$ifdef USE_OPENCL}
+    currentLayer.forwardGPU(state);
+    {$else}
+    currentLayer.forward(state);
+    {$endif}
+    // todo temporary OpenCL output workaroundB
+    state.input := @currentLayer.output;
+    {$ifdef USE_OPENCL}
+    //if (i+1<Length(Layers)) and (currentLayer.layerType=ltCONVOLUTIONAL) and (layers[i+1].layerType<>ltCONVOLUTIONAL) then
+    //  currentLayer.output.pullFromDevice;
+    //if currentLayer.layerType=ltCONVOLUTIONAL then
+    //  currentLayer.output.pullFromDevice;
+    //if currentLayer.layerType=ltCONVOLUTIONAL then
+    //  state.input.pullFromDevice;
+    {$endif}
   end;
 end;
 
 procedure TNNet.backward(var state: TNNetState);
 var
   i: SizeInt;
-  original_input, original_delta: TSingleTensor;
+  original_input: PSingleTensor;
+  original_delta : PSingleTensor;
   prev: TBaseLayer;
   current: TBaseLayer;
 begin
-  original_input := input;
+  original_input := @input;
   original_delta := state.delta;
   state.workspace := workspace;
   for i := High(Layers) downto 0 do
@@ -298,15 +325,19 @@ begin
     else
     begin
       prev := Layers[i - 1];
-      state.input := prev.output;
-      state.delta := prev.delta;
+      state.input := @prev.output;
+      state.delta := @prev.delta;
     end;
     current := Layers[i];
     if current.backwardStop then
       break;
     if current.forwardOnly then
       continue;
+    {$ifdef USE_OPENCL}
+    current.backwardGPU(state);
+    {$else}
     current.backward(state);
+    {$endif}
     if assigned(OnBackward) then
       OnBackward(state);
   end;
@@ -334,7 +365,11 @@ begin
       arg.learningRate := rate;
       arg.momentum := momentum;
       arg.decay := decay;
+      {$ifdef USE_OPENCL}
+      current.updateGPU(arg);
+      {$else}
       current.update(arg);
+      {$endif}
     end;
   end;
 end;
@@ -364,11 +399,17 @@ begin
   state := Default(TNNetState);
   state.net := Self;
   state.isTraining := True;
-  state.input := input;
+  state.input := @input;
   state.workspace := workspace;
-  state.delta.free;
+  if assigned(state.delta) then
+    state.delta.free;
   state.index := 0;
   state.truth.reShape(output().Shape, batch);
+  {$ifdef USE_OPENCL}
+  if not assigned(state.truth.devData) then
+    state.truth.devData := ocl.createDeviceBuffer(state.truth.byteSize());
+  state.truth.setCPU;
+  {$endif}
   state.truth.Data := Pointer(ATruth);
   Inc(seen, batch);
   forward(state);
@@ -376,15 +417,15 @@ begin
   Result := cost();
 end;
 
-function TNNet.predict(const tensor: TSingleTensor): TSingleTensor;
+function TNNet.predict(const tensor: TSingleTensor): PSingleTensor;
 var
   state: TNNetState;
 begin
   state := Default(TNNetState);
   state.net := self;
   state.isTraining := False;
-  state.input := tensor;
-  state.delta.free;
+  state.input := @tensor;
+  //state.delta.free;
   state.index := 0;
   forward(state);
   Result := output();
@@ -417,6 +458,9 @@ begin
       Data.getRandomBatch(batch, pointer(input.Data), pointer(Self.truth))
     else
       Data.getBatch(batch, i * batch, pointer(input.Data), pointer(Self.truth));
+    {$ifdef USE_OPENCL}
+    input.setCPU;
+    {$endif}
     currentSubDivision := i;
     Propagate(pointer(input.Data), pointer(Self.truth));
     err := cost();
@@ -437,7 +481,7 @@ begin
   Result := Result / (batchCount * batch);
 end;
 
-function TNNet.output(): TSingleTensor;
+function TNNet.output: PSingleTensor;
 var
   i: SizeInt;
 begin
@@ -445,7 +489,7 @@ begin
   //if length(Layers) = 0 then exit(default(TTensor<Single>));
   for i := High(Layers) downto 0 do
     if layers[i].layerType <> ltCOST then
-      exit(layers[i].output);
+      exit(@layers[i].output);
 end;
 
 function TNNet.cost(): single;

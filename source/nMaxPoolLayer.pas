@@ -31,7 +31,12 @@ type
     procedure backwardAvgPool(var state : TNNetState);
     procedure forward(var state: TNNetState); override;
     procedure backward(var state: TNNetState); override;
-  end;
+{$ifdef USE_OPENCL}
+    procedure forwardGPU(var state: TNNetState); override;
+    procedure backwardGPU(var state: TNNetState); override;
+{$endif}
+
+end;
 
   { TLocalAvgPoolLayer }
 
@@ -192,7 +197,7 @@ begin
                     blur_size := 2;
                     blur_pad := 0
                 end;
-            inputLayer := TConvolutionalLayer.Create(batch, {1,} outH, outW, outC, outC, outC, blur_size, aStrideX, aStrideX, 1, blur_pad, acLINEAR, false, false, 1, 0, nil, 0, false, train);
+            inputLayer := TConvolutionalLayer.Create(batch, {1,} outH, outW, outC, outC, outC, blur_size, aStrideX, aStrideY, 1, blur_pad, acLINEAR, false, false, 1, 0, nil, 0, false, train);
             blur_nweights := outC * blur_size * blur_size;
             if blur_size = 2 then begin
                 i := 0;
@@ -279,8 +284,8 @@ begin
   w         := PSizeInt(a.I)^;
   h         := PSizeInt(a.J)^;
   src       := a.K;
-  dst       :=a.L;
-  indexes  := a.M;
+  dst       := a.L;
+  indexes  :=  a.M;
 
   for k := f to t do
       begin
@@ -358,10 +363,6 @@ var
     cur_h, cur_w, index: SizeInt;
     s: TNNetState;
 begin
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.forward.start(layerType);
-    {$endif}
-
     if maxpoolDepth<>0 then
         begin
             for b := 0 to batch -1 do
@@ -394,13 +395,10 @@ begin
                                 if assigned(indexes) then
                                     indexes[out_index] := max_i
                             end;
-            {$ifdef USE_TELEMETRY}
-            if benchmark then metrics.forward.start(layerType);
-            {$endif}
             exit()
         end;
     if not state.isTraining and (stride_x = stride_y) then
-        forward_maxpool_layer_avx(state.input, output, Pointer(indexes), kernelSize, w, h, outW, outH, outC, Padding, stride, batch)
+        forward_maxpool_layer_avx(state.input^, output, Pointer(indexes), kernelSize, w, h, outW, outH, outC, Padding, stride, batch)
     else
         begin
             w_offset := -Padding div 2;
@@ -450,14 +448,10 @@ begin
             s.isTraining := state.isTraining;
             s.workspace := state.workspace;
             s.net := state.net;
-            s.input := output;
+            s.input := @output;
             inputLayer.forward(s);
             move(inputLayer.output.Data[0], output.Data[0], inputLayer.outputs * inputLayer.batch * sizeof(single))
         end;
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.forward.finish(layerType);
-    {$endif}
-
 end;
 
 procedure TMaxPoolLayer.forwardAvgPool(var state: TNNetState);
@@ -467,9 +461,6 @@ var
       out_index, counter, cur_h, cur_w, index: SizeInt;
     avg: single;
 begin
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.forward.start(layerType);
-    {$endif}
     w_offset := -Padding div 2;
     h_offset := -Padding div 2;
     //h := l.out_h;
@@ -497,9 +488,6 @@ begin
                                 end;
                         output.Data[out_index] := avg / counter
                     end;
-    {$ifdef USE_TELEMETRY}
-    if benchmark then metrics.forward.finish(layerType);
-    {$endif}
 end;
 
 procedure TMaxPoolLayer.backwardMaxPool(var state: TNNetState);
@@ -547,27 +535,68 @@ end;
 
 procedure TMaxPoolLayer.forward(var state: TNNetState);
 begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.start(layerType);
+  {$endif}
   if avgPool then
       forwardAvgPool(state)
   else
       forwardMaxPool(state);
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.finish(layerType);
+  {$endif}
 end;
 
 procedure TMaxPoolLayer.backward(var state: TNNetState);
 begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.start(layerType);
+  {$endif}
     if avgPool then
         backwardAvgPool(state)
     else
         backwardMaxPool(state);
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
 end;
+
+{$ifdef USE_OPENCL}
+procedure TMaxPoolLayer.forwardGPU(var state: TNNetState);
+begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.start(layerType);
+  {$endif}
+  ocl.forwardMaxPool(batch, outC, outH, outW, state.input.devData, c, h, w, stride_x, stride_y, padding, kernelSize, pointer(indexes), output.devData
+  , 0
+  , nil
+  , nil);
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.finish(layerType);
+  {$endif}
+end;
+
+procedure TMaxPoolLayer.backwardGPU(var state: TNNetState);
+begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.start(layerType);
+  {$endif}
+  ocl.backwardMaxPool(batch, outC, outH, outW, state.delta.devData, pointer(indexes), delta.devData
+  , 0
+  , nil
+  , nil);
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
+end;
+{$endif}
 
 { TLocalAvgPoolLayer }
 
 constructor TLocalAvgPoolLayer.Create(const aBatch, aHeight, aWidth, aChannels,
   aKernelSize: SizeInt; aStride_x: SizeInt; aStride_y: SizeInt;
   const aPadding: sizeInt; aMaxpool_depth: SizeInt; aOutChannels: SizeInt;
-  const aAntialiasing: SizeInt; const isAvgPool: boolean; const ATrain: boolean
-  );
+  const aAntialiasing: SizeInt; const isAvgPool: boolean; const ATrain: boolean);
 begin
   inherited;
 end;

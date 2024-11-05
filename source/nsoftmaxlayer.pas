@@ -22,38 +22,17 @@ type
     procedure setTrain(ATrain: boolean); override;
     procedure forward(var state: TNNetState); override;
     procedure backward(var state: TNNetState); override;
+{$ifdef USE_OPENCL}
+    procedure forwardGPU(var state: TNNetState); override;
+    procedure backwardGPU(var state: TNNetState); override;
+{$endif}
   private
-    class procedure softmaxBatch(const input: PSingle; const n, batch, batch_offset, groups, group_offset, stride: SizeInt; const temp: single; const output: PSingle); static;
+    class procedure softmaxBatch(const input: PSingle; const n:SizeInt; const batch, batch_size, groups, group_size, stride: SizeInt; const temp: single; const output: PSingle); static;
     class procedure softmaxCrossEntropy(const pred, truth: TSingleTensor; var delta, error: TSingleTensor);  static;
 
   end;
 
 implementation
-
-procedure softmax(const input: PSingle; const n: SizeInt; const temp: single; const stride: SizeInt; const output: PSingle);
-var i:SizeInt;
-    sum, largest, e : single;
-    o:PSingle;
-begin
-  // todo [Softmax] SIMDIfy & GPU
-  if n=0 then exit;
-  sum := 0;
-  largest := input[0];
-  for i := 1 to n-1 do
-      if input[i*stride] > largest then
-          largest := input[i*stride];
-  for i := 0 to n-1 do  begin
-      //e := exp(ensureRange((input[i*stride] - largest)/temp, minSingleExp, maxSingleExp));
-      e := exp((input[i*stride] - largest)/temp);
-      sum := sum + e;
-      output[i*stride] := e;
-  end;
-  for i := 0 to n-1 do  begin
-      o:=@output[i*stride];
-      o^ := o^ / sum;
-  end;
-
-end;
 
 
 { TSoftmaxLayer }
@@ -92,10 +71,54 @@ begin
   FTrain := ATrain
 end;
 
+procedure softmax(const n: SizeInt; const input: PSingle; const temp: single; const stride: SizeInt; const output: PSingle);   vectorcall;
+var i:SizeInt;
+    sum, largest, e : single;
+    o:PSingle;
+begin
+  // todo [Softmax] SIMDIfy & GPU
+  if n=0 then exit;
+  sum := 0;
+  largest := input[0];
+  for i := 1 to n-1 do
+      if input[i*stride] > largest then
+          largest := input[i*stride];
+  for i := 0 to n-1 do  begin
+      //e := exp(ensureRange((input[i*stride] - largest)/temp, minSingleExp, maxSingleExp));
+      e := exp((input[i*stride] - largest)/temp);
+      sum := sum + e;
+      output[i*stride] := e;
+  end;
+  for i := 0 to n-1 do  begin
+      o:=@output[i*stride];
+      o^ := o^ / sum;
+  end;
+
+end;
+
+class procedure TSoftmaxLayer.softmaxBatch(const input: PSingle;
+  const n: SizeInt; const batch, batch_size, groups, group_size,
+  stride: SizeInt; const temp: single; const output: PSingle);
+var g, b:SizeInt;
+begin
+  // todo [TSoftmaxLayer::softmaxBatch] SIMDfy & GPU
+  for b := 0 to batch-1 do
+      for g := 0 to groups-1 do
+          softmax(n
+          , input + b*batch_size + g*group_size
+          , temp
+          , stride
+          , output + b*batch_size + g*group_size);
+end;
+
 procedure TSoftmaxLayer.forward(var state: TNNetState);
 var
     i, count, group_size: SizeInt;
 begin
+    {$ifdef USE_TELEMETRY}
+     if benchmark then metrics.forward.start(layerType);
+    {$endif}
+
     if assigned(softmaxTree) then
         begin     // todo [TSoftmaxLayer::forward SIMDfy & GPU
             count := 0;
@@ -112,25 +135,94 @@ begin
         begin
             softmaxCrossEntropy(output, state.truth, delta, loss);
             cost[0] := loss.Sum()
-        end
+        end;
+
+    {$ifdef USE_TELEMETRY}
+     if benchmark then metrics.forward.finish(layerType);
+    {$endif}
 end;
 
 procedure TSoftmaxLayer.backward(var state: TNNetState);
 begin
+  {$ifdef USE_TELEMETRY}
+   if benchmark then metrics.backward.start(layerType);
+  {$endif}
+
   //axpy_cpu(l.inputs * l.batch, 1, l.delta, 1, net.delta, 1)
-  state.delta.add(delta.Data)
+  state.delta.add(delta.Data);
+
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
 end;
 
-class procedure TSoftmaxLayer.softmaxBatch(const input: PSingle; const n,
-  batch, batch_offset, groups, group_offset, stride: SizeInt;
-  const temp: single; const output: PSingle);
-var g, b:SizeInt;
+{$ifdef USE_OPENCL}
+procedure TSoftmaxLayer.forwardGPU(var state: TNNetState);
+var
+  i, count, group_size: SizeInt;
 begin
-  // todo [TSoftmaxLayer::softmaxBatch] SIMDfy & GPU
-  for b := 0 to batch-1 do
-      for g := 0 to groups-1 do
-          softmax(input + b*batch_offset + g*group_offset, n, temp, stride, output + b*batch_offset + g*group_offset);
+  {$ifdef USE_TELEMETRY}
+   if benchmark then metrics.forward.start(layerType);
+  {$endif}
+
+  output.setOCL();
+  loss.setOCL;
+  delta.setOCL;
+
+  if assigned(softmaxTree) then begin
+      count := 0;
+      for i := 0 to softmaxTree[0].groups -1 do begin
+          group_size := softmaxTree[0].group_size[i];
+          ocl.softmaxBatch(state.input.devData, count, group_size, batch, inputs, 1, 0, 1, temperature, output.devData, count
+            , 0
+            , nil
+            , nil
+          );
+          inc(count , group_size)
+      end
+  end else
+      ocl.softmaxBatch(state.input.devData, 0, inputs div groups, batch, inputs, groups, inputs div groups, 1, temperature, output.devData, 0
+        , 0
+        , nil
+        , nil
+      );
+
+  if assigned(state.truth.data) and not noloss then begin
+    if not state.truth.wasGPU() then
+      state.truth.pushToDevice();
+    ocl.crossEntropySoftmax(output.size(), output.devData, state.truth.devData, delta.devData, loss.devData
+      , 0
+      , nil
+      , nil
+    );
+
+    loss.pullFromDevice();
+    cost[0] := loss.Sum()
+  end;
+
+  {$ifdef USE_TELEMETRY}
+   if benchmark then metrics.forward.finish(layerType);
+  {$endif}
 end;
+
+procedure TSoftmaxLayer.backwardGPU(var state: TNNetState);
+begin
+  {$ifdef USE_TELEMETRY}
+   if benchmark then metrics.backward.start(layerType);
+  {$endif}
+
+  if not state.delta.wasGPU() then
+    state.delta.pushToDevice();
+  if not delta.wasGPU() then
+    delta.pushToDevice();
+
+  ocl.addvv(delta.size(), state.delta.devData, delta.devData, 0, nil, nil);
+
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
+end;
+{$endif}
 
 class procedure TSoftmaxLayer.softmaxCrossEntropy(const pred, truth: TSingleTensor; var delta, error: TSingleTensor);
 var i:SizeInt;

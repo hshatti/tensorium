@@ -10,7 +10,10 @@ uses
   SysUtils, math, ntensors, ntypes, nDatasets, nBaseLayer, nConnectedlayer,
   nLogisticLayer, nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer, nUpSampleLayer, nAddLayer,
   nModels, Keyboard, nparser
-  {$ifdef MSWINDOWS}, ShellApi, clblast {$endif}
+  {$ifdef MSWINDOWS}, ShellApi {$endif}
+  {$ifdef USE_OPENCL}
+  , clblast
+  {$endif}
   { you can add units after this };
 
 
@@ -429,9 +432,10 @@ var
 
 begin
   //write(#$1B'[1J');
-  TSingleTensor.computingDevice := cdOpenCL;
-  img.loadFromFile(imageRoot+images[0]);
-  a := img.toTensor();
+  //TSingleTensor.computingDevice := cdOpenCL;
+  //ocl.ActivePlatformId:=1;
+  //img.loadFromFile(imageRoot+images[0]);
+  //a := img.toTensor();
 
 
   //a.SaveToImage(GetCurrentDir+PathDelim+'tmp.jpg');
@@ -491,7 +495,7 @@ begin
 
 
 
-  darknet.Neural.OnForward := doForward();
+  //darknet.Neural.OnForward := doForward();
   darknet.Neural.fuseBatchNorm;
   i:=0;
   benchmark := true;

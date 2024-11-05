@@ -388,12 +388,12 @@ begin
             cId           := 0;
             weights_index := (i+1) * _c;
             while add_index< add_outputs do begin
-              add                           := layers_output[i].Data + batch*add_outputs + add_index;
-              II                            := layers_delta[i].Data  + batch*add_outputs + add_index;
-              DII                           := delta_in.Data         + batch*outputs     + add_index ;
+              add := layers_output[i].Data + batch*add_outputs + add_index;
+              II  := layers_delta[i].Data  + batch*add_outputs + add_index;
+              DII := delta_in.Data         + batch*outputs     + add_index ;
 
-              w                             := weights.data[weights_index];
-              w                             := relu(w)/weightSums[cId];
+              w   := weights.data[weights_index];
+              w   := relu(w)/weightSums[cId];
               //grad                          := w;// exists only GPU kernel but not in CPU!, why?
               //for src_i:=0 to step-1 do
               //  II[src_i] := w * DII[src_i] + II[src_i]; // axpy
@@ -421,12 +421,12 @@ begin
             cId           := 0;
             weights_index := (i+1) * _c;
             while add_index< add_outputs do begin
-              add                           := layers_output[i].Data + batch*add_outputs + add_index;
-              II                            := layers_delta[i].Data  + batch*add_outputs + add_index;
-              DII                           := delta_in.Data         + batch*outputs     + add_index ;
+              add := layers_output[i].Data + batch*add_outputs + add_index;
+              II  := layers_delta[i].Data  + batch*add_outputs + add_index;
+              DII := delta_in.Data         + batch*outputs     + add_index ;
 
-              w                             := weights.data[weights_index];
-              w                             := exp(w-weightMaxes[cId])/weightSums[cId];
+              w   := weights.data[weights_index];
+              w   := exp(w-weightMaxes[cId])/weightSums[cId];
               //grad                          := w*(1-w);// exists only GPU kernel but not in CPU!, why?
               //for src_i:=0 to step-1 do
                 //II[src_i] := w * DII[src_i] + II[src_i];   // axpy
@@ -687,7 +687,7 @@ begin
           output.Add(lOutput.output);
         end
     else
-        add_multilayer(layersOutput, state.input, output, weights, weightsNormalization, weightSums, weightMaxes);
+        add_multilayer(layersOutput, state.input^, output, weights, weightsNormalization, weightSums, weightMaxes);
 
     case ActivationType of
       acSWISH :
@@ -714,7 +714,7 @@ begin
   else
       gradient_array(output, outputs * batch, ActivationType, delta)
   end;
-  backward_add_multilayer(layersDelta, state.delta, delta, weights, weight_updates, state.input, layersOutput, weightsNormalization, weightMaxes, weightSums)
+  backward_add_multilayer(layersDelta, state.delta^, delta, weights, weight_updates, state.input^, layersOutput, weightsNormalization, weightMaxes, weightSums)
 end;
 
 procedure TAddLayer.update(const args: TUpdateArgs);

@@ -790,7 +790,7 @@ begin
                 binarize_weights(weights, filters, nweights, binaryWeights);
             swapbinary();
 
-            state.input.copyTo(binaryInput.Data);
+            state.input.copyTo(binaryInput);
             binaryInput.threshold(0, 1, -1);
             state.input := binaryInput
         end;
@@ -903,7 +903,7 @@ begin
             //forward_convolutional_layer( l.input_layer[0], @s);
             inputLayer.forward(s);
             //move(l.input_layer[0].output[0], l.output[0], l.input_layer[0].outputs * l.input_layer[0].batch * sizeof(single))
-            inputLayer.output.copyTo(output.Data);
+            inputLayer.output.copyTo(output);
         end;
 
     {$ifdef USE_TELEMETRY}

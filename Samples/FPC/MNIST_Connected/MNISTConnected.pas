@@ -7,7 +7,7 @@ uses
   cthreads,
   {$ENDIF}
   SysUtils, ntensors, ntypes, nDatasets, nConnectedlayer, nLogisticLayer,
-  nSoftmaxLayer, nCostLayer, nnet, nChrono, nConvolutionLayer, nModels, nActivation, keyboard
+  nSoftmaxLayer, nCostLayer, nnet, nChrono, nModels, nActivation, keyboard
   { you can add units after this };
 
 const
@@ -24,13 +24,22 @@ var
   costDelta : single;
   s : clock_t;
   Predicted, Truth : TTensor<SizeInt>;
-  output, actual : TSingleTensor;
+  output : PSingleTensor;
+  actual : TSingleTensor;
   c : shortstring;
-
-
+  coor:TArray<SizeInt>;
+  history : TSingleTensor;
 begin
   write(#$1B'[1J'#$1B'[0H');
   writeln('Press [ESC] when the accuracy is enough to test.');
+  sleep(500);
+  sDigits := 2;
+{$ifdef USE_OPENCL}
+  TSingleTensor.defaultDevice:=cdOpenCL;
+  ocl.ActivePlatformId := 1;
+  //ocl.queueInOrder:=true;
+  writeln('InOrder : ', ocl.queueInOrder);
+{$endif}
   MNIST := TMNISTData.Create('');
   Neural:=TNNet.Create(
     //leNetMNIST
@@ -48,8 +57,8 @@ begin
   l1.reSize([READ_BATCH, MNIST.CLASS_COUNT], READ_BATCH);
   Data.X.reShape([READ_BATCH, MNIST.IMAGE_SIZE], READ_BATCH);
   Data.Y.reShape([READ_BATCH, MNIST.CLASS_COUNT], READ_BATCH);
-  actual.reShape(Data.Y.Shape, Data.Y.groups);
-
+  //actual.reShape(Data.Y.Shape, Data.Y.groups);
+  l         := 0;
   i         := 0;
   j         := 0;
   epoch     := 0;
@@ -61,6 +70,7 @@ begin
   predicted.resize([ READ_MEASURE * READ_BATCH]);
   truth.resize([ READ_MEASURE * READ_BATCH]);
   output := Neural.output();
+  actual := Data.Y;
   initKeyboard();
   while true do begin
 
@@ -75,15 +85,15 @@ begin
     MNIST.TrainingData.toSingles(t1.Data);
     MNIST.TrainingLabels.toSingles(l1.Data);
 
-    t1.Normalize();
+    t1.maxNormalize(1);
 
     data.x.Data :=t1.Data;
     data.y.Data :=l1.Data;
 
-    cost := cost + Neural.trainEpoch(Data);
+    cost := cost + Neural.trainEpoch(Data, true);
     actual.Data := Pointer(Neural.truth);
 
-
+    output.pullFromDevice();
     output.argMax(Predicted.data + (j mod READ_MEASURE) * READ_BATCH);
     actual.argMax(Truth.data + (j mod READ_MEASURE) * READ_BATCH);
 
@@ -91,16 +101,22 @@ begin
 
     if j mod READ_MEASURE = READ_MEASURE-1 then begin
       cost := cost / READ_MEASURE ;
+      history.resize([l+1]);
+      history.Data[l] := cost;
       costDelta := costDelta - cost;
       s :=  READ_MEASURE * CLOCKS_PER_SEC div (clock - s);
       write(#$1B'[1H','Batch [',j:4,'][',i:5,'], Cost [',cost:1:8,']',widechar($2191 +2*ord(costDelta>0)),' speed [', s*READ_BATCH :5,'] Sample per second '
         ,'Accuracy [', 100*truth.similarity(predicted.Data):3:3,'%] '#13);
-      writeln(sLineBreak, 'Predicted :'#$1B'[0J');
+      write(sLineBreak, 'Predicted :', #$1b'[11D', #$1B'[B');
       //Predicted.print();
-      output.print(psGray);
-      writeln(sLineBreak, 'Truth :');
+      output.pullFromDevice();
+      coor := output.print(psGray);
+      write(sLineBreak, #$1B'['+intToStr(coor[1]+2)+'A', #$1B'['+intToStr(40)+'C', 'Truth :', #$1b'[7D'#$1B'[B');
       //truth.print();
-      actual.print(psGray);
+      coor := actual.print(psGray);
+      writeln(#$B'[',coor[1],'B');
+      history.plot();
+
       costDelta := cost;
       cost := 0;
       truth.fill(0);
@@ -111,7 +127,8 @@ begin
         readln(c);
         if c = 'b' then break;
       end;
-      s := clock()
+      s := clock() ;
+      inc(l)
     end;
     k := pollKeyEvent();
     if k <>0 then begin
@@ -154,8 +171,8 @@ begin
     MNIST.TestingData.toSingles(t1.Data);
     MNIST.TestingLabels.toSingles(l1.Data);
     t1.Normalize();
+    write(#$1B'[2J'#$1B'[1H');
     t1.print(psGray, READ_TEST);
-
     writeln('truth');
     l1.argMax(truth.Data);
     truth.print;
@@ -163,7 +180,9 @@ begin
     Neural.Input := t1;
 //    Neural.input.reshape([READ_TEST, MNIST.IMAGE_SIZE], READ_TEST);
 //    Neural.Input.printStat;
-    Neural.predict(Neural.input).argMax(predicted.Data);
+    Neural.predict(Neural.input);
+    Neural.output.pullFromDevice();
+    Neural.output.argMax(predicted.Data);
     predicted.print();
 
     writeln('Press [Enter] for next random digit, [Ctrl-C] to exit ...');
