@@ -439,12 +439,12 @@ begin
   setLength(state.events, max(batch, 2));
   {$endif}
   forward(state);
+  Result := output();
   {$ifdef USE_OPENCL}
   ocl.finish();
-  if output.wasGPU() then
+  if result.wasGPU() then
     result.pullFromDevice();
   {$endif}
-  Result := output();
 end;
 
 function TNNet.trainEpoch(const Data: TData; const randomSample: boolean; batchCount: SizeInt): single;

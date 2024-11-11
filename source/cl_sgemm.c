@@ -943,8 +943,9 @@ void xim2col(const long input_h, const long input_w, const long channels,
   const long h_id = ((long)get_global_id(1)) % output_h; // image height, max 'output_h'
   const long c_id = ((long)get_global_id(1)) / output_h; // input channels
   if (h_id < output_h && w_id < output_w && c_id < channels) {
-
+    #pragma unroll 8
     for (long kh_id = 0; kh_id < kernel_h; ++kh_id) { // kernel height
+      #pragma unroll 8
       for (long kw_id = 0; kw_id < kernel_w; ++kw_id) { // kernel width
 
         // Retrieves the input value
@@ -1053,7 +1054,9 @@ void xcol2im(const long input_h, const long input_w, const long channels,
                          (dilation_bez_w * gcd_scale_w + 1) * dilation_w);
   if (w_index < input_w && c_id < channels) {
     float val = 0;
+    #pragma unroll 8
     for (long th = th_begin; th < th_end; th += th_step) {
+      #pragma unroll 8
       for (long tw = tw_begin; tw < tw_end; tw += tw_step) {
         const long kh_id = -th / dilation_h + dilation_bez_h * gcd_scale_h;
         const long kw_id = -tw / dilation_w + dilation_bez_w * gcd_scale_w;

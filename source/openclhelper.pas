@@ -455,7 +455,8 @@ begin
   FillChar(FParamSizes,sizeof(FParamSizes),0);
   for i:=0 to high(FGlobalOffsets) do FGlobalOffsets[i]:=0;
   buffCount:=Length(cInfo);
-  FErr:=clGetPlatformIDs(0,nil,@FPlatformCount);
+  FErr:=clGetPlatformIDs(0,nil,@FPlatformCount); checkError();
+  assert(FPlatformCount>0, 'No OpenCL supported platforms found!');
   if FErr=CL_SUCCESS then
     if FPlatformCount>0 then begin
       SetLength(FPlatforms,FPlatformCount);
@@ -1492,7 +1493,8 @@ end;
 procedure TOpenCL.SetActivePlatformId(AValue: integer);
 var i:integer; dt:cl_device_type;
 begin
-  if (AValue>High(FPlatforms)) or (FActivePlatform=FPlatforms[AValue]) then Exit;
+  assert(AValue<length(FPlatforms), format('Invalid platform id [%d]',[AValue]));
+  if (FActivePlatform=FPlatforms[AValue]) then Exit;
   if AValue>High(FPlatforms) then raise Exception.Create('Platform index out of bounds!');
   FActivePlatform:=FPlatforms[AValue];
   FErr:=clGetDeviceIDs(FActivePlatform,getCL_Device_Type(FDeviceType),0,nil,@FDeviceCount);  CheckError();

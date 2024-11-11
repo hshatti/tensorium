@@ -6,7 +6,7 @@ uses
   {$IFDEF UNIX}
   cthreads,
   {$ENDIF}
-  SysUtils, ntensors, ntypes, nDatasets, nConnectedlayer, nLogisticLayer,
+  SysUtils, steroids, ntensors, ntypes, nDatasets, nConnectedlayer, nLogisticLayer,
   nSoftmaxLayer, nCostLayer, nnet, nChrono, nModels, nActivation, keyboard
   { you can add units after this };
 
@@ -34,11 +34,15 @@ begin
   writeln('Press [ESC] when the accuracy is enough to test.');
   sleep(500);
   sDigits := 2;
+
 {$ifdef USE_OPENCL}
   TSingleTensor.defaultDevice:=cdOpenCL;
-  ocl.ActivePlatformId := 0;
+  initOpenCL(0, 0);
+  writeln('using : ', ocl.PlatformName(ocl.ActivePlatformId));
+  writeln('   - device : ',  ocl.DeviceName(ocl.ActiveDeviceId));
   //ocl.queueInOrder:=true;
-  writeln('InOrder : ', ocl.queueInOrder);
+  writeln('   - InOrder : ', ocl.queueInOrder);
+  sleep(3000);
 {$endif}
   MNIST := TMNISTData.Create('');
   Neural:=TNNet.Create(
@@ -98,7 +102,9 @@ begin
 
     if j mod READ_MEASURE = READ_MEASURE-1 then begin
       cost := cost / READ_MEASURE ;
+      {$ifdef USE_OPENCL}
       ocl.finish();
+      {$endif}
       output.pullFromDevice();
       output.argMax(Predicted.data);
       actual.argMax(Truth.data);

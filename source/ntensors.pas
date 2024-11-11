@@ -1484,7 +1484,7 @@ end;
 
 const
   TILE_M = 4; // four operations
-  TILE_N = 16;  // AVX2 operations * 4<(sizeoof(single));
+  TILE_N = 16;  // AVX2 operations * 4<(sizeof(single));
   TILE_K = 16;  // loops
 {$if defined(CPUX64)}
 
@@ -9640,11 +9640,10 @@ begin
   {$endif}
   var
     kernel_row, kernel_col, output_col, output_rows, input_row, input_col: SizeInt;
-    d_im, d_col, D: PSingle;
+    d_im, d_col: PSingle;
   begin
     d_im := im + imOffset + channel_size * idx;
     d_col := col + colOffset + kernel_size * out_channel_size * idx;
-    D := d_col;
     for kernel_row := 0 to kernelHeight - 1 do for kernel_col :=
       0 to kernelWidth - 1 do
       begin
@@ -10920,7 +10919,8 @@ initialization
 
 
   {$endif}
-  TTensor<single>.im2colvv                  := @sim2Col2;
+  //TTensor<single>.im2colvv                  := @sim2Col2;
+  TTensor<single>.im2colvv                  := @sim2Col;
   TTensor<double>.im2colvv                  := @dim2Col;
   TTensor<single>.col2imvv                  := @scol2im;
   TTensor<double>.col2imvv                  := @dcol2im;

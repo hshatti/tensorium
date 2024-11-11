@@ -18,8 +18,8 @@ uses
 
 
 const
-    cfgFile = '../../../../../cfg/yolov3.cfg';
-    weightFile = '../../../../../yolov3.weights';
+    cfgFile = '../../../../../cfg/yolov7.cfg';
+    weightFile = '../../../../../yolov7.weights';
     images :TStringArray = ['dog.jpg', 'person.jpg', 'eagle.jpg', 'giraffe.jpg', 'horses.jpg', 'kite.jpg', 'startrek1.jpg'];
     imageRoot = '../../../../../data/';
     classNamesFile = 'coco.names';

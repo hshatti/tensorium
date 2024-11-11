@@ -76,7 +76,7 @@ begin
   //write(#$1B'[1J');
 {$ifdef USE_OPENCL}
   TSingleTensor.defaultDevice := cdOpenCL;
-  initOpenCL(0);
+  initOpenCL(1);
   writeln('Using : ',  ocl.PlatformName(ocl.ActivePlatformId));
   writeln('  - Device            : ',  ocl.DeviceName(ocl.ActiveDeviceId));
 
