@@ -7,7 +7,7 @@ interface
 uses
   SysUtils, math, nTensors, nTypes, nBaseLayer
   {$ifdef USE_OPENCL}
-  , opencl, OpenCLHelper, clblast
+  , opencl, OpenCLHelper
   {$endif}
   ;
 
@@ -115,7 +115,7 @@ begin
   {$ifdef USE_TELEMETRY}
    if benchmark then metrics.forward.start(layerType);
   {$endif}
-  ev := nil;
+
   //CLBlastScopy(output.Size, state.input.devData, 0, 1, output.devData, 0, 1, @ocl.ActiveQueue
   //, nil//@ev
   //);
@@ -129,10 +129,11 @@ begin
   loss.setOCL;
 
   ocl.ActivateArray(output.devData, output.Size(), longint(ActivationType)
-  , 0//1
-  , nil//@ev
-  , nil//@ev
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
   //ocl.finish();
 
   if assigned(state.truth.Data) then  begin
@@ -140,17 +141,16 @@ begin
       state.truth.pushToDevice();
 
     ocl.crossEntropyLogistic(output.size(), output.devData, state.truth.devData, delta.devData, loss.devData
-    , 0//1
-    , nil//@ev
-    , nil//@ev
-    );
+    {$IFDEF CL_EVENTS}
+    , 1, pointer(events), pointer(events));
+    {$ELSE}
+    , 0, nil, nil);
+    {$ENDIF}
     //ocl.finish();
 
     loss.pullFromDevice();
     cost[0] := loss.sum
   end;
-  //ocl.waitForEvents(1, @ev);
-  //ocl.finish();
 
   //t.resize(output.shape);
   //output.pullFromDevice(t);
@@ -165,24 +165,19 @@ end;
 
 procedure TLogisticLayer.backwardGPU(var state: TNNetState);
 var t:TSingleTensor;
-    ev:cl_event;
 begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.start(layerType);
   {$endif}
-  if not state.delta.wasGPU() then
-    state.delta.pushToDevice();
-  if not delta.wasGPU() then
-    delta.pushToDevice();
+  //if not state.delta.wasGPU() then state.delta.pushToDevice();
+  if not delta.wasGPU() then delta.pushToDevice();
 
   ocl.addvv(delta.size(), state.delta.devData, delta.devData
-  , 0
-  , nil
-  , nil//@ev
-  );
-  //ocl.waitForEvents(1, @ev);
-  //ocl.finish();
-
+  {$ifdef CL_EVENTS}
+  , 1, pointer(events), pointer(events));
+  {$else}
+  , 0, nil, nil);
+  {$endif}
   //t.resize(state.delta.shape);
   //state.delta.pullFromDevice(t);
   //backward(state);

@@ -66,7 +66,6 @@ type
     rewrittenBBox: SizeInt;
 
     truth: TArray<single>;
-
     //outTensor             : TSingleTensor;
 
     //TrainablesX, TrainablesY : TArray<single>;
@@ -265,9 +264,6 @@ procedure TNNet.forward(var state: TNNetState);
 var
   i: SizeInt;
   currentLayer: TBaseLayer;
-  {$ifdef USE_OPENCL}
-  ev : cl_event;
-  {$endif}
 begin
   state.workspace := workspace;
   for i := 0 to High(Layers) do
@@ -277,8 +273,13 @@ begin
     if state.isTraining and assigned(currentLayer.delta.Data) and currentLayer.train then begin
       //currentLayer.delta.Multiply(0);
     {$ifdef USE_OPENCL}
-      ocl.fill(currentLayer.delta.size(), currentLayer.delta.devData, 0, 1, 0, nil, @ev);
-      //ocl.waitForEvents(1, @ev);
+      ocl.fill(currentLayer.delta.size(), currentLayer.delta.devData, 0, 1, 0, nil
+      {$IFDEF CL_EVENTS}
+      , pointer(state.events));
+      ocl.waitForEvents(1, pointer(state.events));
+      {$ELSE}
+      , nil);
+      {$ENDIF}
     {$else}
       currentLayer.delta.fill(0);
     {$endif}
@@ -286,20 +287,15 @@ begin
     if assigned(OnForward) then OnForward(state);
 
     {$ifdef USE_OPENCL}
+    currentLayer.events := state.events;
+    currentLayer.ev     := state.ev;
     currentLayer.forwardGPU(state);
+    //ocl.finish();
     {$else}
     currentLayer.forward(state);
     {$endif}
     // todo temporary OpenCL output workaroundB
     state.input := @currentLayer.output;
-    {$ifdef USE_OPENCL}
-    //if (i+1<Length(Layers)) and (currentLayer.layerType=ltCONVOLUTIONAL) and (layers[i+1].layerType<>ltCONVOLUTIONAL) then
-    //  currentLayer.output.pullFromDevice;
-    //if currentLayer.layerType=ltCONVOLUTIONAL then
-    //  currentLayer.output.pullFromDevice;
-    //if currentLayer.layerType=ltCONVOLUTIONAL then
-    //  state.input.pullFromDevice;
-    {$endif}
   end;
 end;
 
@@ -334,7 +330,10 @@ begin
     if current.forwardOnly then
       continue;
     {$ifdef USE_OPENCL}
+    current.events := state.events;
+    current.ev     := state.ev;
     current.backwardGPU(state);
+    //ocl.finish();
     {$else}
     current.backward(state);
     {$endif}
@@ -367,6 +366,7 @@ begin
       arg.decay := decay;
       {$ifdef USE_OPENCL}
       current.updateGPU(arg);
+      //ocl.finish();
       {$else}
       current.update(arg);
       {$endif}
@@ -409,11 +409,19 @@ begin
   if not assigned(state.truth.devData) then
     state.truth.devData := ocl.createDeviceBuffer(state.truth.byteSize());
   state.truth.setCPU;
+  setLength(state.events, max(batch, 2));
+  setLength(state.ev, length(state.events));
   {$endif}
   state.truth.Data := Pointer(ATruth);
   Inc(seen, batch);
   forward(state);
+  {$ifdef USE_OPENCL}
+  ocl.finish();
+  {$endif}
   backward(state);
+  {$ifdef USE_OPENCL}
+  ocl.finish();
+  {$endif}
   Result := cost();
 end;
 
@@ -427,7 +435,15 @@ begin
   state.input := @tensor;
   //state.delta.free;
   state.index := 0;
+  {$ifdef USE_OPENCL}
+  setLength(state.events, max(batch, 2));
+  {$endif}
   forward(state);
+  {$ifdef USE_OPENCL}
+  ocl.finish();
+  if output.wasGPU() then
+    result.pullFromDevice();
+  {$endif}
   Result := output();
 end;
 

@@ -136,8 +136,6 @@ const
   CL_KERNEL_ARG_TYPE_NAME         = $1198;
   CL_KERNEL_ARG_TYPE_QUALIFIER    = $1199;
   CL_KERNEL_ARG_NAME              = $119A;
-  CL_KERNEL_PRIVATE_MEM_SIZE      = $11B4;
-  CL_KERNEL_GLOBAL_WORK_SIZE      = $11b5;
   CL_DEVICE_BUILT_IN_KERNELS      = $103f;
   (* cl_kernel_arg_address_qualifier *)
   CL_KERNEL_ARG_ADDRESS_GLOBAL               = $119B  ;
@@ -522,6 +520,7 @@ const
   CL_QUEUE_DEVICE                             = $1091;
   CL_QUEUE_REFERENCE_COUNT                    = $1092;
   CL_QUEUE_PROPERTIES                         = $1093;
+  CL_QUEUE_SIZE                               = $1094;
 
 // cl_mem_flags - bitfield
   CL_MEM_READ_WRITE                           = (1 shl 0);
@@ -635,6 +634,9 @@ const
   CL_KERNEL_WORK_GROUP_SIZE                   = $11B0;
   CL_KERNEL_COMPILE_WORK_GROUP_SIZE           = $11B1;
   CL_KERNEL_LOCAL_MEM_SIZE                    = $11B2;
+ CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = $11B3;
+  CL_KERNEL_PRIVATE_MEM_SIZE                  = $11B4;
+  CL_KERNEL_GLOBAL_WORK_SIZE                  = $11B5;
 
 // cl_event_info
   CL_EVENT_COMMAND_QUEUE                      = $11D0;

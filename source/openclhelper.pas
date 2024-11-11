@@ -68,6 +68,7 @@ type
     KernelName:array[0..cInfoSize] of ansichar;
     KernelGlobalWorkSize:array[0..2] of size_t;
     KernelWorkGroupSize:size_t;
+    KernelSIMDSize : size_t;
     KernelLocalMemSize:cl_ulong;
     KernelPrivateMemSize:cl_ulong;
     KernelArgCount:cl_uint;
@@ -100,13 +101,14 @@ type
     FProgramSource: ansistring;
     cinfo:TDeviceStr;
     FWorkItemDimensions: integer;
-    N:size_t;
+    BuffCount:size_t;
     FGlobalOffsets:TWorkSizes;
-    FGlobalMemSize:size_t;
     FGlobalWorkGroupSizes:TWorkSizes;
     FLocalWorkGroupSizes:TWorkSizes;
 
+    FGlobalMemSize:size_t;
     FLocalMemSize:cl_ulong;
+    FGlobalCacheSize:size_t;
     FExecCaps:cl_device_exec_capabilities;
     FMaxWorkItemDimensions:cl_uint;
     FMaxWorkGroupSize:size_t;
@@ -137,7 +139,7 @@ type
     procedure SetQueueInOrder(AValue: boolean);
     procedure SetWorkItemDimensions(AValue: integer);
   public
-    CLDeviceVersion:TDeviceStr;
+    CLDeviceCVersion:TDeviceStr;
     CLDeviceDriver:TDeviceStr;
     FErr:cl_int;
     //events    : array[0..MAX_EVENTS_COUNT-1] of cl_event;
@@ -150,6 +152,8 @@ type
     procedure SetLocalWorkGroupSizes(const x: size_t; const y: size_t=0; const z: size_t=0);
     procedure SetParamElementSizes(paramSizes: array of size_t);
     function DevicesTypeStr:ansistring;
+    function getQueueSize():cl_uint;
+    function getQueueRefCount():cl_uint;
     procedure SetGlobalOffsets(const x: size_t; y: size_t=0; z: size_t=0);
     function CleanUp(const keepContext: boolean=false): boolean;
     function ProcessorsCount:integer;
@@ -217,8 +221,8 @@ type
       const B:cl_mem; const bOffset:SizeInt; const ldb:SizeInt;
       const BETA: single; const C:cl_mem; const cOffset:SizeInt; const ldc:SizeInt;
       const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
-    procedure addvv(const N:SizeInt; const a, b:cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
-    procedure subvv(const N:SizeInt; const a, b:cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
+    procedure addvv(const N:SizeInt; const dst, src:cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
+    procedure subvv(const N:SizeInt; const dst, src:cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
     procedure axpy(const N:SizeInt; const a:single; const x:cl_mem; const incx:SizeInt; const y:cl_mem; const incy:sizeInt; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
     procedure scale(const N:SizeInt; const a:Single; const x:cl_mem; const stride:SizeInt; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
     procedure crossEntropyLogistic(const N:SizeInt; const pred, truth: cl_mem; delta, error: cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
@@ -232,6 +236,15 @@ type
     procedure forwardMaxPool(const aBatch, outC, outH, outW: SizeInt; const input: cl_mem; const c, h, w: SizeInt;
       const stride_x, stride_y, padding, kernelSize: SizeInt; indexes, output: cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
     procedure backwardMaxPool(const aBatch, outC, outH, outW : SizeInt; output:cl_mem; const indexes, delta : cl_mem; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
+    procedure im2col(const aChannels, aHeight, aWidth
+      , kernelHeight, kernelWidth, padHeight, padWidth
+      , strideY, strideX, dilationY, dilationX : SizeInt
+      ; const im :cl_mem; const imOffset : SizeInt
+      ; const col:cl_mem; const colOffset:SizeInt; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
+    procedure col2im(const aChannels, aHeight, aWidth, kernelHeight, kernelWidth,
+      padHeight, padWidth, strideY, strideX, dilationY, dilationX: SizeInt;
+      const col: cl_mem; const colOffset: SizeInt;
+      const im: cl_mem; const imOffset: SizeInt; const eventCount:cl_uint = 0; const events: pcl_event = nil; event: pcl_event = nil);
     class function Plaforms:cl_uint;static;
 
 
@@ -441,7 +454,7 @@ begin
   FPlatformCount:=0;
   FillChar(FParamSizes,sizeof(FParamSizes),0);
   for i:=0 to high(FGlobalOffsets) do FGlobalOffsets[i]:=0;
-  N:=Length(cInfo);
+  buffCount:=Length(cInfo);
   FErr:=clGetPlatformIDs(0,nil,@FPlatformCount);
   if FErr=CL_SUCCESS then
     if FPlatformCount>0 then begin
@@ -500,6 +513,18 @@ begin
   result:=FDevsTypeStr;
 end;
 
+function TOpenCL.getQueueSize(): cl_uint;
+var r: size_t;
+begin
+  FErr := clGetCommandQueueInfo(ActiveQueue, CL_QUEUE_REFERENCE_COUNT, sizeOf(cl_uint), @result, r) ; CheckError();
+end;
+
+function TOpenCL.getQueueRefCount(): cl_uint;
+var r:size_t;
+begin
+  FErr := clGetCommandQueueInfo(ActiveQueue, CL_QUEUE_SIZE, sizeOf(cl_uint), @result, r) ; CheckError();
+end;
+
 procedure TOpenCL.SetGlobalOffsets(const x: size_t; y: size_t; z: size_t);
 begin
   FGlobalOffsets[0]:=x;
@@ -555,14 +580,13 @@ end;
 function TOpenCL.PlatformName(Index: integer): ansistring;
 begin
 
-  clGetPlatformInfo(FPlatforms[Index],CL_PLATFORM_NAME,cInfoSize,@cinfo[0],N);
+  clGetPlatformInfo(FPlatforms[Index],CL_PLATFORM_NAME,cInfoSize,@cinfo[0],buffCount);
   result:=cinfo;
 end;
 
 function TOpenCL.DeviceName(Index: integer): ansistring;
 begin
-  N:=255;
-  clGetDeviceInfo(FDevices[Index],CL_DEVICE_NAME,cInfoSize,@cinfo[0],N);
+  clGetDeviceInfo(FDevices[Index],CL_DEVICE_NAME,cInfoSize,@cinfo[0],buffCount);
   result:=cinfo;
 end;
 
@@ -582,15 +606,16 @@ begin
   result:=False;
   src:=PAnsiChar(FProgramSource);
 {$ifdef DEBUG}
-  par:=PAnsiCHar('-cl-kernel-arg-info '+params);
+  par:=PAnsiCHar('-cl-kernel-arg-info -cl-std=CL2.0 -cl-opt-disable -Werror -g '+params);
 {$else}
-  par:=PAnsiCHar('-cl-kernel-arg-info -cl-fast-relaxed-math -cl-mad-enable '+params);
+  par:=PAnsiCHar('-cl-kernel-arg-info -cl-std=CL2.0 -cl-fast-relaxed-math -cl-mad-enable '+params);
 {$endif}
   FProgram:=clCreateProgramWithSource(FContext,1,@src,nil,FErr);CheckError();
   FErr:=clBuildProgram(Fprogram,FDeviceCount,@FDevices[0],par,nil,nil);
-  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_STATUS,cInfoSize,@FBuildStatus,N);CheckError();
-  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_LOG,cInfoSize,@cinfo[0],N);CheckError();
-  FBuildLog:=trim(system.copy(cinfo,0,N));
+  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_STATUS,cInfoSize,@FBuildStatus,buffCount);CheckError();
+  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_LOG,cInfoSize,@cinfo[0],buffCount);CheckError();
+  FBuildLog:=trim(system.copy(cinfo,0,buffCount));
+  assert(FBuildStatus=CL_BUILD_SUCCESS, '[OpenCL] : cannot compile tensor kernels :' + sLineBreak+ FBuildlog);
   if FBuildStatus= CL_BUILD_SUCCESS then begin
     if FBuildlog<>'' then begin
       writeln(StdErr, FBuildLog);
@@ -610,7 +635,7 @@ end;
 
 function TOpenCL.readLog: ansistring;
 begin
-  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_LOG,cInfoSize,@cinfo[0],N);CheckError();
+  FErr:=clGetProgramBuildInfo(FProgram,FActiveDevice,CL_PROGRAM_BUILD_LOG,cInfoSize,@cinfo[0], buffCount);CheckError();
   result := cinfo
 end;
 
@@ -622,20 +647,22 @@ end;
 function TOpenCL.KernelInfo(index: integer): TCLKernelInfo;
 var sz:size_t;i:integer;
 begin
-    FErr:=clGetKernelInfo(FKernels[Index],CL_KERNEL_FUNCTION_NAME,cInfoSize,@result.KernelName[0],N);                                      CheckError();
-    FErr:=clGetKernelInfo(FKernels[Index],CL_KERNEL_NUM_ARGS,cInfoSize,@result.KernelArgCount,N);                                          CheckError();
-//    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_GLOBAL_WORK_SIZE,cInfoSize,@result.KernelGlobalWorkSize[0],@N);  CheckError();
-    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_WORK_GROUP_SIZE,cInfoSize,@result.KernelWorkGroupSize,@N);     CheckError();
-    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_LOCAL_MEM_SIZE,cInfoSize,@result.KernelLocalMemSize,@N);       CheckError();
-    //FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_PRIVATE_MEM_SIZE,cInfoSize,@result.KernelPrivateMemSize,@N);     CheckError();
+    FErr:=clGetKernelInfo(FKernels[Index],CL_KERNEL_FUNCTION_NAME,cInfoSize,@result.KernelName[0], buffCount);                                      CheckError();
+    FErr:=clGetKernelInfo(FKernels[Index],CL_KERNEL_NUM_ARGS,cInfoSize,@result.KernelArgCount,buffCount);                                          CheckError();
+    //FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_GLOBAL_WORK_SIZE,cInfoSize,@result.KernelGlobalWorkSize[0],@buffCount);  CheckError();
+    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_WORK_GROUP_SIZE,sizeOf(result.KernelWorkGroupSize),@result.KernelWorkGroupSize,@buffCount);     CheckError();
+    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_LOCAL_MEM_SIZE,sizeOf(result.KernelLocalMemSize),@result.KernelLocalMemSize,@buffCount);       CheckError();
+    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_PRIVATE_MEM_SIZE,sizeOf(result.KernelPrivateMemSize),@result.KernelPrivateMemSize,@buffCount);     CheckError();
+    FErr:=clGetKernelWorkGroupInfo(FKernels[Index],FActiveDevice,CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE, sizeOf(result.KernelSIMDSize),@result.KernelSIMDSize,@buffCount);     CheckError();
+
     setLength(result.KernelArgs,result.KernelArgCount);
     for i:=0 to result.KernelArgCount-1 do begin
-        N:=$ff;
-        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_NAME,cInfoSize,@result.KernelArgs[i].ArgName[0],@N);                         CheckError();
-        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_TYPE_NAME,cInfoSize,@result.KernelArgs[i].ArgType[0],@N);                    CheckError();
-        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_TYPE_QUALIFIER,cInfoSize,@result.KernelArgs[i].ArgTypeQualifier,@N);         CheckError();
-        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_ACCESS_QUALIFIER,cInfoSize,@result.KernelArgs[i].ArgAccess,@N);              CheckError();
-        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_ADDRESS_QUALIFIER,cInfoSize,@result.KernelArgs[i].ArgAddress,@N);            CheckError();
+        buffCount:=$ff;
+        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_NAME,cInfoSize,@result.KernelArgs[i].ArgName[0],@buffCount);                         CheckError();
+        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_TYPE_NAME,cInfoSize,@result.KernelArgs[i].ArgType[0],@buffCount);                    CheckError();
+        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_TYPE_QUALIFIER,sizeof(result.KernelArgs[i].ArgTypeQualifier),@result.KernelArgs[i].ArgTypeQualifier,@buffCount);   CheckError();
+        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_ACCESS_QUALIFIER, sizeof(result.KernelArgs[i].ArgAccess),@result.KernelArgs[i].ArgAccess,@buffCount);              CheckError();
+        FErr:=clGetKernelArgInfo(FKernels[Index],i,CL_KERNEL_ARG_ADDRESS_QUALIFIER, sizeof(result.KernelArgs[i].ArgAddress),@result.KernelArgs[i].ArgAddress,@buffCount);           CheckError();
     end;
 
 end;
@@ -790,7 +817,8 @@ begin
   if aSize mod 5  = 0 then exit(5);
   if aSize mod 4  = 0 then exit(4);
   if aSize mod 3  = 0 then exit(3);
-  result := 2;
+  if aSize mod 2  = 0 then exit(2);
+  result := 1;
 end;
 
 procedure TOpenCL.ActivateArray(const x: cl_mem; const N: SizeInt;
@@ -801,12 +829,12 @@ var NN:SizeInt;
 begin
   SetGlobalWorkGroupSizes(N);
   SetGlobalOffsets(0);
-  NN:=LSize(N);
-  SetLocalWorkGroupSizes(NN);
+  //NN:=LSize(N);
+  //SetLocalWorkGroupSizes(NN);
   FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(x)          , @x);         CheckError();
   FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(activation) , @activation);   CheckError();
   FErr := clEnqueueNDRangeKernel(ActiveQueue, Kernels[kernelId]
-    , WorkItemDimensions, @GlobalOffsets[0], @GlobalWorkGroupSizes[0], @LocalWorkGroupSizes[0]
+    , WorkItemDimensions, @GlobalOffsets[0], @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
     , eventCount, Events, event); CheckError();
   //inc(eventsCount) ;
   //FErr := clFinish(ActiveQueue); CheckError();
@@ -861,38 +889,25 @@ const kernelId=4;
 var
     NN, MM , i, k, aOffset, bOffset:SizeInt;
 begin
-    //for k := 0 to batch - 1 do
-    //  for i := 0 to N - 1 do begin
-    //    c := a + k*N*blockSize + i*blockSize;
-    //    for j:=0 to blockSize-1 do
-    //      c[j] := c[j] +  b[i];
-    //  end;
-
 
   //NN:=LSize(N);
   //MM:=LSize(blockSize);
-  SetGlobalWorkGroupSizes(N, batch);
-  SetGlobalOffsets(0, 0);
+  SetGlobalWorkGroupSizes(N, batch, blockSize);
+  SetGlobalOffsets(0);
   //SetLocalWorkGroupSizes(MM, NN);
   //SetGlobalWorkGroupSizes(N, blockSize);
   //SetLocalWorkGroupSizes(NN, MM);
   aOffset :=0;
   bOffset :=0;
   FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(a)        , @a);         CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 2, SizeOf(blockSize), @blockSize); CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 3, SizeOf(b)        , @b);         CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 4, SizeOf(bOffset)  , @bOffset);   CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 5, SizeOf(incb)     , @incb);      CheckError();
-  //for k:=0 to batch-1 do
-  begin
-    //aOffset  :=  k*N*blockSize;
-    FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(aOffset), @aOffset);   CheckError();
-    FErr := clEnqueueNDRangeKernel(ActiveQueue, Kernels[kernelId]
-    , WorkItemDimensions, @GlobalOffsets[0], @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
-    , eventCount, Events, event); CheckError();
-    //inc(eventsCount);
-  end;
-  //FErr := clFinish(ActiveQueue); CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(aOffset)  , @aOffset);   CheckError();
+  //FErr := clSetKernelArg(Kernels[kernelId], 2, SizeOf(blockSize), @blockSize); CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 2, SizeOf(b)        , @b);         CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 3, SizeOf(bOffset)  , @bOffset);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 4, SizeOf(incb)     , @incb);      CheckError();
+  FErr := clEnqueueNDRangeKernel(ActiveQueue, Kernels[kernelId]
+  , WorkItemDimensions, @GlobalOffsets[0], @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
+  , eventCount, Events, event); CheckError();
 
 end;
 
@@ -975,7 +990,7 @@ begin
 
 end;
 
-procedure TOpenCL.addvv(const N: SizeInt; const a, b: cl_mem;
+procedure TOpenCL.addvv(const N: SizeInt; const dst, src: cl_mem;
   const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
 const kernelId = 9;
 var NN:SizeInt;
@@ -984,8 +999,8 @@ begin
   SetGlobalOffsets(0);
   //NN:=LSize(N);
   //SetLocalWorkGroupSizes(NN);
-  FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(a) , @a);   CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(b) , @b);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(dst) , @dst);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(src) , @src);   CheckError();
   FErr := clEnqueueNDRangeKernel(
      ActiveQueue, Kernels[kernelId],
      WorkItemDimensions, @GlobalOffsets[0],
@@ -993,7 +1008,7 @@ begin
      , eventCount, Events, event); CheckError();
 end;
 
-procedure TOpenCL.subvv(const N: SizeInt; const a, b: cl_mem;
+procedure TOpenCL.subvv(const N: SizeInt; const dst, src: cl_mem;
   const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
 const kernelId = 10;
 var NN:SizeInt;
@@ -1002,8 +1017,8 @@ begin
   SetGlobalOffsets(0);
   //NN:=LSize(N);
   //SetLocalWorkGroupSizes(NN);
-  FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(a) , @a);   CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(b) , @b);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(dst) , @dst);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(src) , @src);   CheckError();
   FErr := clEnqueueNDRangeKernel(
      ActiveQueue, Kernels[kernelId],
      WorkItemDimensions, @GlobalOffsets[0],
@@ -1061,8 +1076,8 @@ var NN:SizeInt;
 begin
   SetGlobalWorkGroupSizes(N);
   SetGlobalOffsets(0);
-  NN:=LSize(N);
-  SetLocalWorkGroupSizes(NN);
+  //NN:=LSize(N);
+  //SetLocalWorkGroupSizes(NN);
   FErr := clSetKernelArg(Kernels[kernelId], 0, SizeOf(pred)    , @pred);  CheckError();
   FErr := clSetKernelArg(Kernels[kernelId], 1, SizeOf(truth)   , @truth); CheckError();
   FErr := clSetKernelArg(Kernels[kernelId], 2, SizeOf(delta)   , @delta); CheckError();
@@ -1070,7 +1085,7 @@ begin
   FErr := clEnqueueNDRangeKernel(
      ActiveQueue, Kernels[kernelId],
      WorkItemDimensions, @GlobalOffsets[0],
-     @GlobalWorkGroupSizes[0], @LocalWorkGroupSizes[0]
+     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
      , eventCount, Events, event); CheckError();
 end;
 
@@ -1122,7 +1137,7 @@ procedure TOpenCL.softmaxBatch(const input: cl_mem; const iOffset, N: SizeInt;
   const batch, batch_size, groups, group_size, stride: SizeInt;
   const temp: single; const output: cl_mem; const oOffset: SizeInt;
   const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
-const kernelId = 16;
+const kernelId = 18;
 var NN:SizeInt;
 begin
   SetGlobalWorkGroupSizes(batch, groups);
@@ -1149,7 +1164,7 @@ end;
 procedure TOpenCL.crossEntropySoftmax(const N: SizeInt; const pred,
   truth: cl_mem; delta, error: cl_mem; const eventCount: cl_uint;
   const events: pcl_event; event: pcl_event);
-const kernelId = 17;
+const kernelId = 19;
 var NN:SizeInt;
 begin
   SetGlobalWorkGroupSizes(N);
@@ -1163,7 +1178,7 @@ begin
   FErr := clEnqueueNDRangeKernel(
      ActiveQueue, Kernels[kernelId],
      WorkItemDimensions, @GlobalOffsets[0],
-     @GlobalWorkGroupSizes[0], @LocalWorkGroupSizes[0]
+     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
      , eventCount, Events, event); CheckError();
 end;
 
@@ -1171,44 +1186,32 @@ procedure TOpenCL.forwardMaxPool(const aBatch, outC, outH, outW: SizeInt;
   const input: cl_mem; const c, h, w: SizeInt; const stride_x, stride_y,
   padding, kernelSize: SizeInt; indexes, output: cl_mem;
   const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
-const kernelId = 18;
-var NN:SizeInt;
-    iOffset, oOffset, i : SizeInt;
+const kernelId = 16;
+var NN, MM:SizeInt;
 begin
-  SetGlobalWorkGroupSizes(outC, outH, outW);
+  SetGlobalWorkGroupSizes(ABatch * outC, outH, outW);
   SetGlobalOffsets(0);
-  //NN:=LSize(N);
-  //SetLocalWorkGroupSizes(NN);
-  iOffset := 0; oOffset := 0;
-  FErr := clSetKernelArg(Kernels[kernelId], 0 , SizeOf(input)      , @input);  CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 2 , SizeOf(c)          , @c);      CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 3 , SizeOf(h)          , @h);      CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 4 , SizeOf(w)          , @w);      CheckError();
+  //NN := LSize(ABatch * outC);
+  //MM := LSize(outH* outW);
+  //SetLocalWorkGroupSizes(NN, MM);
 
-  FErr := clSetKernelArg(Kernels[kernelId], 5 , SizeOf(stride_x)   , @stride_x);   CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 6 , SizeOf(stride_y)   , @stride_y);   CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 7 , SizeOf(padding)    , @padding);    CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 8 , SizeOf(kernelSize) , @kernelSize); CheckError();
-  //if assigned(indexes) then
-    FErr := clSetKernelArg(Kernels[kernelId], 9 , SizeOf(indexes)    , @indexes);     CheckError();
-  FErr := clSetKernelArg(Kernels[kernelId], 10, SizeOf(output)     , @output);     CheckError();
-  for i:=0 to aBatch do begin
-    FErr := clSetKernelArg(Kernels[kernelId], 1  , SizeOf(iOffset)      , @iOffset);  CheckError();
-    FErr := clSetKernelArg(Kernels[kernelId], 11 , SizeOf(oOffset)      , @oOffset);  CheckError();
-    FErr := clEnqueueNDRangeKernel(
-       ActiveQueue, Kernels[kernelId],
-       WorkItemDimensions, @GlobalOffsets[0],
-       @GlobalWorkGroupSizes[0], @LocalWorkGroupSizes[0]
-       , eventCount, Events, event); CheckError();
-    inc(iOffset, c*h*w);
-    inc(iOffset, outC*outH*outW)
-  end
+  FErr := clSetKernelArg(Kernels[kernelId], 0 , SizeOf(input)      , @input);  CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 1 , SizeOf(c)          , @c);      CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 2 , SizeOf(h)          , @h);      CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 3 , SizeOf(w)          , @w);      CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 4 , SizeOf(stride_x)   , @stride_x);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 5 , SizeOf(stride_y)   , @stride_y);   CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 6 , SizeOf(padding)    , @padding);    CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 7 , SizeOf(kernelSize) , @kernelSize); CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 8 , SizeOf(indexes)    , @indexes);     CheckError();
+  FErr := clSetKernelArg(Kernels[kernelId], 9 , SizeOf(output)     , @output);     CheckError();
+  FErr := clEnqueueNDRangeKernel(ActiveQueue, Kernels[kernelId], WorkItemDimensions, @GlobalOffsets[0], @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}, eventCount, Events, event); CheckError();
 end;
 
 procedure TOpenCL.backwardMaxPool(const aBatch, outC, outH, outW: SizeInt;
   output: cl_mem; const indexes, delta: cl_mem; const eventCount: cl_uint;
   const events: pcl_event; event: pcl_event);
-const kernelId = 18;
+const kernelId = 17;
 var
     NN:SizeInt;
 begin
@@ -1222,7 +1225,207 @@ begin
   FErr := clEnqueueNDRangeKernel(
      ActiveQueue, Kernels[kernelId],
      WorkItemDimensions, @GlobalOffsets[0],
-     @GlobalWorkGroupSizes[0], @LocalWorkGroupSizes[0]
+     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
+     , eventCount, Events, event); CheckError();
+end;
+
+//procedure TOpenCL.im2col(const aChannels, aHeight, aWidth, kernelHeight,
+//  kernelWidth, padHeight, padWidth, strideY, strideX, dilationY,
+//  dilationX: SizeInt; const im: cl_mem; const imOffset: SizeInt;
+//  const col: cl_mem; const colOffset: SizeInt; const batch: SizeInt;
+//  const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
+//const kernelId = 20;
+//var
+//    NN:SizeInt;
+//begin
+//  SetGlobalWorkGroupSizes(aChannels, kernelHeight* kernelWidth);
+//  SetGlobalOffsets(0);
+//  //NN:=LSize(N);
+//  //SetLocalWorkGroupSizes(NN);
+//  FErr := clSetKernelArg(Kernels[kernelId], 0 , SizeOf(aHeight)         , @aHeight);  CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 1 , SizeOf(aWidth)          , @aWidth); CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 2 , SizeOf(kernelHeight)    , @kernelHeight);   CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 3 , SizeOf(kernelWidth)     , @kernelWidth);  CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 4 , SizeOf(padHeight)       , @padHeight); CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 5 , SizeOf(padWidth)        , @padWidth);   CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 6 , SizeOf(strideY)         , @strideY);  CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 7 , SizeOf(strideX)         , @strideX); CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 8 , SizeOf(dilationY)       , @dilationY);   CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 9 , SizeOf(dilationX)       , @dilationX);  CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 10, SizeOf(im)              , @im); CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 11, SizeOf(imOffset)        , @imOffset);   CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 12, SizeOf(col)             , @col);  CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 13, SizeOf(colOffset)       , @colOffset); CheckError();
+//  FErr := clSetKernelArg(Kernels[kernelId], 14, SizeOf(batch)           , @batch);   CheckError();
+//  FErr := clEnqueueNDRangeKernel(
+//     ActiveQueue, Kernels[kernelId],
+//     WorkItemDimensions, @GlobalOffsets[0],
+//     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
+//     , eventCount, Events, event); CheckError();
+//end;
+
+function ceil(const a, b: SizeInt):SizeInt;  overload;
+begin
+  result := (1 + (a-1) div b)*b
+end;
+
+const COPY_DIMX = 8;
+      COPY_DIMY = 8;
+
+procedure TOpenCL.im2col(const aChannels, aHeight, aWidth, kernelHeight,
+  kernelWidth, padHeight, padWidth, strideY, strideX, dilationY,
+  dilationX: SizeInt; const im: cl_mem; const imOffset: SizeInt;
+  const col: cl_mem; const colOffset: SizeInt ;
+  const eventCount: cl_uint; const events: pcl_event; event: pcl_event);
+const kernelId = 22;
+var
+    NN, size_h, padding_h, col_h, padding_w, size_w, col_w, ceiled_w,
+      ceiled_h:SizeInt;
+begin
+  // Sets the height and width of the 'col' result
+  size_h      := aHeight + 2 * padHeight;
+  padding_h   := dilationY * (kernelHeight - 1) + 1;
+  if size_h >= padding_h then
+    col_h       := (size_h - padding_h) div strideY + 1
+  else
+    col_h       := 1;
+  size_w      := aWidth + 2 * padWidth;
+  padding_w   := dilationX * (kernelWidth - 1) + 1;
+  if size_w >= padding_w then
+    col_w       := (size_w - padding_w) div strideX + 1
+  else
+    col_w       := 1;
+  ceiled_w    := Ceil(col_w, COPY_DIMX);
+  ceiled_h    := Ceil(col_h, COPY_DIMY);
+
+  SetGlobalWorkGroupSizes(ceiled_w, ceiled_h * aChannels);
+  SetGlobalOffsets(0);
+
+  // Sets the kernel arguments
+  FErr := clSetKernelArg(FKernels[kernelId], 0,  sizeOf(aHeight    ), @aHeight    ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 1,  sizeOf(aWidth     ), @aWidth     ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 2,  sizeOf(aChannels  ), @aChannels  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 3,  sizeOf(col_h     ), @col_h     ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 4,  sizeOf(col_w     ), @col_w     ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 5,  sizeOf(kernelHeight  ), @kernelHeight  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 6,  sizeOf(kernelWidth  ), @kernelWidth  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 7,  sizeOf(padHeight     ), @padHeight     ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 8,  sizeOf(padWidth     ), @padWidth     ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 9,  sizeOf(strideY  ), @strideY  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 10, sizeOf(strideX  ), @strideX  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 11, sizeOf(dilationY), @dilationY); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 12, sizeOf(dilationX), @dilationX); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 13, sizeOf(im        ), @im        ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 14, sizeOf(imOffset  ), @imOffset  ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 15, sizeOf(col       ), @col       ); checkError();
+  FErr := clSetKernelArg(FKernels[kernelId], 16, sizeOf(colOffset ), @colOffset ); checkError();
+
+  // Launches the kernel
+  //NN:=LSize(N);
+  //SetLocalWorkGroupSizes(NN);
+  FErr := clEnqueueNDRangeKernel(
+     ActiveQueue, Kernels[kernelId],
+     WorkItemDimensions, @GlobalOffsets[0],
+     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
+     , eventCount, Events, event); CheckError();
+end;
+
+//// Solve Bezout's identity
+//// a * p + b * q = r = GCD(a, b)
+procedure EuclidGCD( a, b: SizeInt; var p, q, r:SizeInt);inline;
+var p_1, p_2, q_1, q_2, c:SizeInt;
+begin
+  p := 0;
+  q := 1;
+  p_1 := 1;
+  q_1 := 0;
+  while true do begin
+    c := a mod b;
+    if c = 0  then
+      break;
+    p_2 := p_1;
+    q_2 := q_1;
+    p_1 := p;
+    q_1 := q;
+    p := p_2 - p_1 * (a div b);
+    q := q_2 - q_1 * (a div b);
+    a := b;
+    b := c;
+  end;
+  r := b;
+end;
+
+procedure TOpenCL.col2im(const aChannels, aHeight, aWidth, kernelHeight,
+  kernelWidth, padHeight, padWidth, strideY, strideX, dilationY,
+  dilationX: SizeInt; const col: cl_mem; const colOffset: SizeInt;
+  const im: cl_mem; const imOffset: SizeInt; const eventCount: cl_uint;
+  const events: pcl_event; event: pcl_event);
+const kernelId = 24;
+var
+    NN, size_h, padding_h, col_h, size_w, padding_w, col_w,
+      dilation_bez_h, dilation_bez_w, gcd_h, gcd_w, stride_bez_h,
+      stride_bez_w, w_ceiled, h_ceiled:SizeInt;
+
+begin
+  //SetGlobalWorkGroupSizes(aChannels{, kernelHeight, kernelWidth});
+
+  size_h          := AHeight + 2 * padHeight;
+  padding_h       := dilationY * (kernelHeight - 1) + 1;
+  if size_h >= padding_h then
+    col_h           := (size_h - padding_h) div strideY + 1
+  else
+    col_h           := 1;
+  size_w          := AWidth + 2 * padWidth;
+  padding_w       := dilationX * (kernelWidth - 1) + 1;
+  if size_w >= padding_w then
+    col_w           := (size_w - padding_w) div strideX + 1
+  else
+    col_w           := 1;
+  stride_bez_h    := 0;
+  stride_bez_w    := 0;
+  dilation_bez_h  := 0;
+  dilation_bez_w  := 0;
+  gcd_h           := 0;
+  gcd_w           := 0;
+  EuclidGCD(strideY, dilationY, stride_bez_h, dilation_bez_h, gcd_h);
+  EuclidGCD(strideX, dilationX, stride_bez_w, dilation_bez_w, gcd_w);
+
+  w_ceiled := Ceil((aWidth - 1) div gcd_w + 1, COPY_DIMX);
+  h_ceiled := Ceil((aHeight - 1) div gcd_h + 1, COPY_DIMY);
+  //const auto local = std::vector<size_t>{db_["COPY_DIMX"], db_["COPY_DIMY"]};
+  SetGlobalWorkGroupSizes(w_ceiled, h_ceiled * aChannels);
+
+  SetGlobalOffsets(0);
+  //NN:=LSize(N);
+  //SetLocalWorkGroupSizes(NN);
+  FErr := clSetKernelArg(kernels[kernelId], 0,  sizeof(aHeight       ), @aHeight         ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 1,  sizeof(aWidth        ), @aWidth          ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 2,  sizeof(aChannels     ), @aChannels       ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 3,  sizeof(col_h         ), @col_h           ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 4,  sizeof(col_w         ), @col_w           ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 5,  sizeof(kernelHeight  ), @kernelHeight    ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 6,  sizeof(kernelWidth   ), @kernelWidth     ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 7,  sizeof(padHeight     ), @padHeight       ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 8,  sizeof(padWidth      ), @padWidth        ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 9,  sizeof(strideY       ), @strideY         ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 10, sizeof(strideX       ), @strideX         ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 11, sizeof(dilationY     ), @dilationY       ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 12, sizeof(dilationX     ), @dilationX       ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 13, sizeof(stride_bez_h  ), @stride_bez_h    ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 14, sizeof(stride_bez_w  ), @stride_bez_w    ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 15, sizeof(dilation_bez_h), @dilation_bez_h  ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 16, sizeof(dilation_bez_w), @dilation_bez_w  ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 17, sizeof(gcd_h         ), @gcd_h           ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 18, sizeof(gcd_w         ), @gcd_w           ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 19, sizeof(col           ), @col             ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 20, sizeof(colOffset     ), @colOffset       ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 21, sizeof(im            ), @im              ); checkError();
+  FErr := clSetKernelArg(kernels[kernelId], 22, sizeof(imOffset      ), @imOffset        ); checkError();
+
+  FErr := clEnqueueNDRangeKernel(
+     ActiveQueue, Kernels[kernelId],
+     WorkItemDimensions, @GlobalOffsets[0],
+     @GlobalWorkGroupSizes[0], nil{@LocalWorkGroupSizes[0]}
      , eventCount, Events, event); CheckError();
 end;
 
@@ -1258,19 +1461,20 @@ begin
   CleanUp(true);
   FQueue:=clCreateCommandQueue(FContext,FDevices[AValue], 0, 0 (* QWord(@FErr) *) ); CheckError();
   FActiveDevice:=FDevices[AValue];
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_EXECUTION_CAPABILITIES,SizeOf(cl_device_exec_capabilities),@FExecCaps,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_GROUP_SIZE,SizeOf(FMaxWorkGroupSize),@FMaxWorkGroupSize,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,SizeOf(FMaxWorkItemDimensions),@FMaxWorkItemDimensions,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_MEM_ALLOC_SIZE,SizeOf(FMaxMemAllocSize),@FMaxMemAllocSize,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_ITEM_SIZES,SizeOf(size_t)*3,@FMaxWorkItemSizes[0],N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_COMPUTE_UNITS,SizeOf(FMaxComputeUnits),@FMaxComputeUnits,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_CLOCK_FREQUENCY,SizeOf(FMaxFrequency),@FMaxFrequency,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_GLOBAL_MEM_SIZE,SizeOf(FGlobalMemSize),@FGlobalMemSize,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_LOCAL_MEM_SIZE,SizeOf(FLocalMemSize),@FLocalMemSize,N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_BUILT_IN_KERNELS,cInfoSize,@FDeviceBuiltInKernels[0],N);CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_OPENCL_C_VERSION,cInfoSize,@CLDeviceVersion[0],N); CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_VENDOR,cInfoSize,@CLDeviceDriver,N);            CheckError();
-  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_HOST_UNIFIED_MEMORY,SizeOf(isShared),@isShared,N);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_EXECUTION_CAPABILITIES,SizeOf(cl_device_exec_capabilities),@FExecCaps, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_GROUP_SIZE,SizeOf(FMaxWorkGroupSize),@FMaxWorkGroupSize, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_ITEM_DIMENSIONS,SizeOf(FMaxWorkItemDimensions),@FMaxWorkItemDimensions, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_MEM_ALLOC_SIZE,SizeOf(FMaxMemAllocSize),@FMaxMemAllocSize, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_WORK_ITEM_SIZES,SizeOf(size_t)*3,@FMaxWorkItemSizes[0], buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_COMPUTE_UNITS,SizeOf(FMaxComputeUnits),@FMaxComputeUnits, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_MAX_CLOCK_FREQUENCY,SizeOf(FMaxFrequency),@FMaxFrequency, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_GLOBAL_MEM_SIZE,SizeOf(FGlobalMemSize),@FGlobalMemSize, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_LOCAL_MEM_SIZE,SizeOf(FLocalMemSize),@FLocalMemSize, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_GLOBAL_MEM_CACHE_SIZE,SizeOf(FGlobalCacheSize),@FGlobalCacheSize, buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_BUILT_IN_KERNELS,cInfoSize,@FDeviceBuiltInKernels[0], buffCount);CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_OPENCL_C_VERSION,cInfoSize,@CLDeviceCVersion[0], buffCount); CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_VENDOR,cInfoSize,@CLDeviceDriver, buffCount);            CheckError();
+  FErr:=clGetDeviceInfo(FActiveDevice,CL_DEVICE_HOST_UNIFIED_MEMORY,SizeOf(isShared),@isShared, buffCount);CheckError();
   FSharedMemory:=isShared=CL_TRUE;
   if wasBuilt then
     Build;
@@ -1299,7 +1503,7 @@ begin
   FDevsTypeStr:='';
   for i:=0 to FDeviceCount-1 do
     begin
-      FErr:=clGetDeviceInfo(FDevices[i],CL_DEVICE_TYPE_INFO,SizeOf(size_t),@dt,N);  CheckError();
+      FErr:=clGetDeviceInfo(FDevices[i],CL_DEVICE_TYPE_INFO,SizeOf(size_t),@dt, buffCount);  CheckError();
       Case dt of
         CL_DEVICE_TYPE_DEFAULT:begin FDevicesType[i]:=dtDefault;FDevsTypeStr:=FDevsTypeStr+#13#10'DEFAULT' end;
         CL_DEVICE_TYPE_CPU:begin FDevicesType[i]:=dtCPU;FDevsTypeStr:=FDevsTypeStr+#13#10'CPU' end;

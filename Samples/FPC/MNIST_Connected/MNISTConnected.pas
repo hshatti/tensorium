@@ -36,7 +36,7 @@ begin
   sDigits := 2;
 {$ifdef USE_OPENCL}
   TSingleTensor.defaultDevice:=cdOpenCL;
-  ocl.ActivePlatformId := 1;
+  ocl.ActivePlatformId := 0;
   //ocl.queueInOrder:=true;
   writeln('InOrder : ', ocl.queueInOrder);
 {$endif}
@@ -67,8 +67,8 @@ begin
   Randomize;
   //for i := 0 to MNIST.DATA_COUNT div READ_BATCH -1 do begin
   s := clock();
-  predicted.resize([ READ_MEASURE * READ_BATCH]);
-  truth.resize([ READ_MEASURE * READ_BATCH]);
+  predicted.resize([ READ_BATCH]);
+  truth.resize([ READ_BATCH]);
   output := Neural.output();
   actual := Data.Y;
   initKeyboard();
@@ -93,14 +93,15 @@ begin
     cost := cost + Neural.trainEpoch(Data, true);
     actual.Data := Pointer(Neural.truth);
 
-    output.pullFromDevice();
-    output.argMax(Predicted.data + (j mod READ_MEASURE) * READ_BATCH);
-    actual.argMax(Truth.data + (j mod READ_MEASURE) * READ_BATCH);
 
     //writeln(#$1B'[4;0H', 'Press [ESC] to stop training...');
 
     if j mod READ_MEASURE = READ_MEASURE-1 then begin
       cost := cost / READ_MEASURE ;
+      ocl.finish();
+      output.pullFromDevice();
+      output.argMax(Predicted.data);
+      actual.argMax(Truth.data);
       history.resize([l+1]);
       history.Data[l] := cost;
       costDelta := costDelta - cost;
@@ -109,7 +110,6 @@ begin
         ,'Accuracy [', 100*truth.similarity(predicted.Data):3:3,'%] '#13);
       write(sLineBreak, 'Predicted :', #$1b'[11D', #$1B'[B');
       //Predicted.print();
-      output.pullFromDevice();
       coor := output.print(psGray);
       write(sLineBreak, #$1B'['+intToStr(coor[1]+2)+'A', #$1B'['+intToStr(40)+'C', 'Truth :', #$1b'[7D'#$1B'[B');
       //truth.print();

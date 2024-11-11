@@ -160,6 +160,7 @@ end;
 procedure TSoftmaxLayer.forwardGPU(var state: TNNetState);
 var
   i, count, group_size: SizeInt;
+  t:TSingleTensor;
 begin
   {$ifdef USE_TELEMETRY}
    if benchmark then metrics.forward.start(layerType);
@@ -174,28 +175,40 @@ begin
       for i := 0 to softmaxTree[0].groups -1 do begin
           group_size := softmaxTree[0].group_size[i];
           ocl.softmaxBatch(state.input.devData, count, group_size, batch, inputs, 1, 0, 1, temperature, output.devData, count
-            , 0
-            , nil
-            , nil
-          );
+            {$IFDEF CL_EVENTS}
+            , 1, @state.events[i mod batch], @state.events[i mod batch]);
+            {$ELSE}
+            , 0, nil, nil);
+            {$ENDIF}
+
           inc(count , group_size)
       end
   end else
       ocl.softmaxBatch(state.input.devData, 0, inputs div groups, batch, inputs, groups, inputs div groups, 1, temperature, output.devData, 0
-        , 0
-        , nil
-        , nil
-      );
+        {$IFDEF CL_EVENTS}
+        , 1, pointer(state.events), pointer(state.events));
+        {$ELSE}
+        , 0, nil, nil);
+        {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
 
   if assigned(state.truth.data) and not noloss then begin
     if not state.truth.wasGPU() then
       state.truth.pushToDevice();
     ocl.crossEntropySoftmax(output.size(), output.devData, state.truth.devData, delta.devData, loss.devData
-      , 0
-      , nil
-      , nil
-    );
+      {$IFDEF CL_EVENTS}
+      , 1, pointer(state.events), pointer(state.events));
+      {$ELSE}
+      , 0, nil, nil);
+      {$ENDIF}
 
+    //ocl.finish();
+    //ocl.waitForEvents(batch, pointer(events));
+    //softmaxCrossEntropy(output, state.truth, delta, loss);
+    //delta.pullFromDevice(t);
+    //writeln(state.index,' FW SOFTMAX sumSqrDelta : ', t.sumSqrDiff(delta):1:6);
+    //readln;
     loss.pullFromDevice();
     cost[0] := loss.Sum()
   end;
@@ -206,18 +219,28 @@ begin
 end;
 
 procedure TSoftmaxLayer.backwardGPU(var state: TNNetState);
+var t: TSingleTensor;
 begin
   {$ifdef USE_TELEMETRY}
    if benchmark then metrics.backward.start(layerType);
   {$endif}
 
-  if not state.delta.wasGPU() then
-    state.delta.pushToDevice();
-  if not delta.wasGPU() then
-    delta.pushToDevice();
+  //if not state.delta.wasGPU() then state.delta.pushToDevice();
+  if not delta.wasGPU() then delta.pushToDevice();
 
-  ocl.addvv(delta.size(), state.delta.devData, delta.devData, 0, nil, nil);
+  ocl.addvv(delta.size(), state.delta.devData, delta.devData
+    {$IFDEF CL_EVENTS}
+    , 1, pointer(state.events), pointer(state.events));
+    {$ELSE}
+    , 0, nil, nil);
+    {$ENDIF}
 
+  //backward(state);
+  //state.delta.pullFromDevice(t);
+  //writeln(state.index,' BW SOFTMAX sumSqrDiff state.delta : ', t.sumSqrDiff(delta):1:6);
+  //readln;
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(layerType);
   {$endif}

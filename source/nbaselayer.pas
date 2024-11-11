@@ -5,7 +5,11 @@ unit nBaseLayer;
 interface
 
 uses
-  SysUtils, ntypes, ntensors, nActivation;
+  SysUtils, ntypes, ntensors, nActivation
+  {$ifdef USE_OPENCL}
+  , OpenCL
+  {$endif}
+  ;
 
 const
   // metrics to print :
@@ -75,6 +79,10 @@ type
     cost                     : TArray<Single>;
     index                    : SizeInt;
     net                      : TObject;
+    {$ifdef USE_OPENCL}
+    events                   : TArray<cl_event>;
+    ev                       : TArray<cl_int>;
+    {$endif}
     function getWorkspaceSize():SizeInt; virtual;
     procedure Activate;   inline;
     procedure Derivative; virtual;
@@ -389,6 +397,7 @@ begin
   fillchar(PAnsiChar(@grad.all)[0], sizeOf(grad.all), #0);
   fillchar(PAnsiChar(@forward.all)[0], sizeOf(forward.all), #0);
   fillchar(PAnsiChar(@backward.all)[0], sizeOf(backward.all), #0);
+  fillchar(PAnsiChar(@update.all)[0], sizeOf(backward.all), #0);
 
 end;
 

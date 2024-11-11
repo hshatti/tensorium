@@ -19,6 +19,9 @@ uses
   {$elseif defined(FRAMEWORK_VCL)}
   Graphics
   {$endif}
+  {$ifdef USE_OPENCL}
+  , OpenCL
+  {$endif}
   ;
 
 const
@@ -45,6 +48,10 @@ type
       index : SizeInt;
       label_smooth_eps : single;
       adversarial : boolean;
+      {$ifdef USE_OPENCL}
+      events: TArray<cl_event>;
+      ev    : TArray<cl_int>;
+      {$endif}
   end;
 
   PActivationType = ^TActivationType;

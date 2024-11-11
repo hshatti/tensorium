@@ -244,18 +244,25 @@ __kernel void sgemm1_tn(const long K, const float ALPHA ,
     //*C += dotv(K, A, lda, B, 1) * ALPHA ;
 }
 
-__kernel void forward_bias(__global float* a,  const long aOffset, const long blockSize, __global float* b, const long bOffset, const long incb)
+__kernel void forward_bias(__global float* a,  const long aOffset, /*const long blockSize, */__global float* b, const long bOffset, const long incb)
 {
 
   const long N = get_global_size(0);
+  const long blockSize = get_global_size(2);
   const long i = get_global_id(0);
   const long k = get_global_id(1);
+  const long j = get_global_id(2);
+
+  //if (i==0 && k==0){
+    //printf("        N = %ld\n", N);
+    //printf("blockSize = %ld\n", blockSize);
+  //}
   //for (i = 0; i<N; i++)
   //  for (k = 0; k<batch; k++){
   a += (k*N + i)*blockSize;
   float bb = b[i * incb];
-  #pragma unroll 8
-      for (long j=0; j<blockSize; j++)
+  //#pragma unroll 8
+  //    for (long j=0; j<blockSize; j++)
         a[j] += bb;
   //}
 }
@@ -693,16 +700,16 @@ __kernel void backward_bias(__global float* a, const long blockSize, __global fl
       a[i] +=sum;
 }
 
-__kernel void addv( __global float* a, __global const float* b){
+__kernel void addv( __global float* dst, __global const float* src){
 
    const long i = get_global_id(0);
-   a[i] += b[i];
+   dst[i] += src[i];
 }
 
-__kernel void subv( __global float* a, __global const float* b){
+__kernel void subv( __global float* dst, __global const float* src){
 
    const long i = get_global_id(0);
-   a[i] -= b[i];
+   dst[i] -= src[i];
 }
 
 __kernel void axpy(const float a, __global const float* x, const long incx, __global float* y, const long incy){
@@ -748,6 +755,52 @@ __kernel void copy(
    b[i*incb] = a[i*inca];
 }
 
+__kernel void forwardMaxpool(
+     __global float* input
+     , const long c, const long h, const long w
+     , const long stride_x, const long stride_y, const long padding, const long kernelSize
+     , __global long* indexes, __global float* output){
+
+  const long w_offset = -padding / 2;
+  const long h_offset = -padding / 2;
+
+  //const long outC = get_global_size(0);
+  const long outH = get_global_size(1);
+  const long outW = get_global_size(2);
+  long k = get_global_id(0);
+  long y = get_global_id(1);
+  long x = get_global_id(2);
+
+  long out_index = x + outW*(y + outH*k) ;//+ outW*outH*outC*b;
+  float max = -FLT_MAX;
+  long max_i = -1;
+  #pragma unroll 8
+  for (long n=0; n<kernelSize; n++)
+      #pragma unroll 8
+      for (long m=0; m<kernelSize; m++){
+          long cur_h = h_offset+y * stride_y+n;
+          long cur_w = w_offset+x * stride_x+m;
+          long index = cur_w + w*(cur_h + h*k) ;//+ w*h*outC*b;
+          float val = (cur_h >= 0) && (cur_h < h) && (cur_w >= 0) && (cur_w < w)? input[index]: -FLT_MAX;
+          if (val > max){
+            max_i = index;
+            max = val;
+          }
+      }
+  output[out_index] = max;
+  if (indexes)
+      indexes[out_index] = max_i;
+}
+
+__kernel void backwardMaxPool( __global float* output, __global const long* indexes, __global const float* delta){
+        const long i = get_global_id(0);
+        const long j = get_global_id(1);
+        const long id = i*get_global_size(1) + j;
+
+        const long index = indexes[id];
+        output[index] += delta[id];
+}
+
 
 void softmax(const long n, __global float* input, const long stride, const float temp, __global float* output){
 
@@ -781,6 +834,11 @@ __kernel void softmaxBatch(__global float* input, const long iOffset, const long
 
 }
 
+void move(const __global float* src, __global float* dst , const long count){
+  #pragma unroll 8
+  for (long i=0 ; i<count; i++) dst[i] = src[i];
+}
+
 #define sEPSILON 0.000001f
 __kernel void softmaxCrossEntropy(const __global float* pred, const __global float* truth, __global float* delta, __global float* error){
 
@@ -796,54 +854,279 @@ __kernel void softmaxCrossEntropy(const __global float* pred, const __global flo
 
 }
 
-__kernel void forwardMaxpool(
-     __global float* input, long const long iOffset
-     , const long c, const long h, const long w
-     , const long stride_x, const long stride_y, const long  padding, const long kernelSize
-     , __global long* indexes, __global float* output, const long oOffset){
-  const long w_offset = -padding / 2;
-  const long h_offset = -padding / 2;
-  //_h := out_h;
-  //_w := out_w;
-  //_c := c;
-  const long outC = get_global_size(0);
-  const long outH = get_global_size(1);
-  const long outW = get_global_size(2);
-  //for b := 0 to batch -1 do
-      //for (long k = 0; k<outC;k++)
-      //    for (long i=0; i<outH; i++)
-      //        for (long j=0; j<outW; j++)
-                long k = get_global_id(0);
-                long i = get_global_id(1);
-                long j = get_global_id(2);
-                input   += iOffset;
-                indexes += iOffset;
-                output  += oOffset;
-              //{
+__kernel void im2col(const long aHeight, const long aWidth
+  , const long kernelHeight, const long kernelWidth, const long padHeight, const long padWidth
+  , const long strideY, const long strideX, const long dilationY, const long dilationX
+  , __global float* im , const long imOffset
+  , __global float* col, const long colOffset, const long batch){
 
-                      long out_index = j + outW*(i + outH*k) ;//+ outW*outH*outC*b;
-                      float max = -FLT_MAX;
-                      long max_i = -1;
-                      for (long n=0; n<kernelSize; n++)
-                          for (long m=0; m<kernelSize; m++){
-                              long cur_h = h_offset+i * stride_y+n;
-                              long cur_w = w_offset+j * stride_x+m;
-                              long index = cur_w + w*(cur_h + h*k) ;//+ w*h*outC*b;
-                              float val = (cur_h >= 0) && (cur_h < h) && (cur_w >= 0) && (cur_w < w)? input[index]: -FLT_MAX;
-                              if (val > max){
-                                max_i = index;
-                                max = val;
-                              }
-                          }
-                      output[out_index] = max;
-                      if (indexes)
-                          indexes[out_index] = max_i;
-                  //}
+  long aChannels = get_global_size(0);
+  long chan = get_global_id(0);
+  long k = get_global_id(1);
+  const long kernelSize = kernelHeight*kernelWidth;
+
+  const long outWidth = (aWidth + 2 * padWidth - (dilationX * (kernelWidth - 1) + 1)) / strideX + 1;
+  const long outHeight = (aHeight + 2 * padHeight - (dilationY * (kernelHeight - 1) + 1)) / strideY + 1;
+  const long outSize = outWidth * outHeight;
+  const long inSize = aWidth * aHeight;
+  const long sizeX = outWidth - 2 * padWidth;
+
+    //for (long k=0 ; k<kernelWidth*kernelHeight; k++)
+    {
+      long kernelRow = k / kernelWidth;
+      long kernelCol = k % kernelWidth;
+      //const long kernelRow = get_global_id(1);
+      //const long kernelCol = get_global_id(2);
+
+      #pragma unroll 8
+      for (long b=0 ; b<batch; b++)
+      {
+        long i = (b*aChannels + chan)*inSize + aWidth*(kernelRow*dilationY - padHeight) + kernelCol*dilationX - padWidth;
+        __global float* im1 = imOffset + im + i;
+        __global float* col1 = colOffset + col + padWidth * outWidth + outSize*kernelSize*(chan + b*aChannels) + outSize*(kernelRow * kernelWidth + kernelCol) ;
+        #pragma unroll 8
+        for (long outRow=padHeight ; outRow<outHeight - padHeight ; outRow++)
+        {
+          long j = outRow * aWidth * strideY + padWidth * strideX ;
+          if (strideX == 1)
+            move(im1 + j, col1 + padWidth, sizeX);
+          else
+            #pragma unroll 8
+            for (long outCol=padWidth ;  outCol<outWidth - padWidth; outCol++)
+            {
+              //j := outRow * aWidth * strideY + outCol * strideX;
+              col1[outCol] = im1[j];
+              j += strideX;
+            }
+          col1 += outWidth;
+        }
+      }
+    }
 }
 
-__kernel void backwardMaxPool( __global float* output, __global const long* indexes, __global const float* delta){
-        const long i = get_global_id(0);
-        const long index = indexes[i];
-        output[index] += delta[i];
+void fills(__global float* dst, const long N, const float val){
+  #pragma unroll 8
+  for (long i=0 ; i<N; i++)
+    dst[i] = val;
 }
+
+
+//col2im :
+//https://github.com/CNugteren/CLBlast/blob/master/src/kernels/levelx/col2im.opencl
+
+// Work-group size parameters re-used from the 'copy' kernel
+#ifndef COPY_DIMX
+  #define COPY_DIMX 8      // Local workgroup size in the first dimension (w)
+#endif
+#ifndef COPY_DIMY
+  #define COPY_DIMY 8      // Local workgroup size in the second dimension (h)
+#endif
+
+// =================================================================================================
+
+long grid_ceil(const long x, const long step) {
+  return x > 0 ? ((x - 1) / step + 1) * step : x / step * step;
+}
+
+void xim2col(const long input_h, const long input_w, const long channels,
+                         const long output_h, const long output_w,
+                         const long kernel_h, const long kernel_w,
+                         const long pad_h, const long pad_w,
+                         const long stride_h, const long stride_w,
+                         const long dilation_h, const long dilation_w,
+                         const bool kernel_flip,
+                         const __global float* restrict im_buffer, const long im_offset,
+                         __global float* col_buffer, const long col_offset) {
+
+  // Thread IDs
+  const long w_id = get_global_id(0); // image width, max 'output_w'
+  const long h_id = ((long)get_global_id(1)) % output_h; // image height, max 'output_h'
+  const long c_id = ((long)get_global_id(1)) / output_h; // input channels
+  if (h_id < output_h && w_id < output_w && c_id < channels) {
+
+    for (long kh_id = 0; kh_id < kernel_h; ++kh_id) { // kernel height
+      for (long kw_id = 0; kw_id < kernel_w; ++kw_id) { // kernel width
+
+        // Retrieves the input value
+        const long h_index = -pad_h + kh_id * dilation_h + stride_h * h_id;
+        const long w_index = -pad_w + kw_id * dilation_w + stride_w * w_id;
+        float val;
+        if (h_index >= 0 && h_index < input_h &&
+            w_index >= 0 && w_index < input_w) {
+          const long input_index = w_index + input_w * (h_index + input_h * c_id);
+          val = im_buffer[input_index + im_offset];
+        }
+        else {
+          val = 0;
+        }
+
+        // Sets the output value
+        const long kernel_index = (kernel_flip)
+                               ? kernel_h * kernel_w - kw_id - kernel_w * kh_id - 1
+                               : kw_id + kernel_w * kh_id;
+        const long patch_index = w_id + output_w * h_id;
+        const long output_index = patch_index + kernel_index * output_w * output_h +
+                                  c_id * output_w * output_h * kernel_h * kernel_w;
+        col_buffer[output_index + col_offset] = val;
+      }
+    }
+  }
+}
+
+// =================================================================================================
+
+// Kernel flip version of the Xim2col kernel (for convolution)
+//#if RELAX_WORKGROUP_SIZE == 1
+  __kernel
+//#else
+//  __kernel __attribute__((reqd_work_group_size(COPY_DIMX, COPY_DIMY, 1)))
+//#endif
+void Xim2colKernelFlip(const long input_h, const long input_w, const long channels,
+                       const long output_h, const long output_w,
+                       const long kernel_h, const long kernel_w,
+                       const long pad_h, const long pad_w,
+                       const long stride_h, const long stride_w,
+                       const long dilation_h, const long dilation_w,
+                       const __global float* restrict im_buffer, const long im_offset,
+                       __global float* col_buffer, const long col_offset) {
+  const bool kernel_flip = true;
+  xim2col(input_h, input_w, channels, output_h, output_w, kernel_h, kernel_w,
+          pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w,
+          kernel_flip,
+          im_buffer, im_offset, col_buffer, col_offset);
+}
+
+// Normal version of the Xim2col kernel (for cross-correlation)
+//#if RELAX_WORKGROUP_SIZE == 1
+  __kernel
+//#else
+//  __kernel __attribute__((reqd_work_group_size(COPY_DIMX, COPY_DIMY, 1)))
+//#endif
+void Xim2colKernelNormal(const long input_h, const long input_w, const long channels,
+                         const long output_h, const long output_w,
+                         const long kernel_h, const long kernel_w,
+                         const long pad_h, const long pad_w,
+                         const long stride_h, const long stride_w,
+                         const long dilation_h, const long dilation_w,
+                         const __global float* restrict im_buffer, const long im_offset,
+                         __global float* col_buffer, const long col_offset) {
+  const bool kernel_flip = false;
+  xim2col(input_h, input_w, channels, output_h, output_w, kernel_h, kernel_w,
+          pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w,
+          kernel_flip,
+          im_buffer, im_offset, col_buffer, col_offset);
+}
+
+void xcol2im(const long input_h, const long input_w, const long channels,
+                         const long output_h, const long output_w,
+                         const long kernel_h, const long kernel_w,
+                         const long pad_h, const long pad_w,
+                         const long stride_h, const long stride_w,
+                         const long dilation_h, const long dilation_w,
+                         const long stride_bez_h, const long stride_bez_w,
+                         const long dilation_bez_h, const long dilation_bez_w,
+                         const long gcd_h, const long gcd_w,
+                         const bool kernel_flip,
+                         const __global float* restrict col_buffer, const long col_offset,
+                         __global float* im_buffer, const long im_offset) {
+
+  const long input_h_scaled = (input_h - 1) / gcd_h + 1;
+
+  // Thread IDs
+  const long gcd_scale_w = get_global_id(0) + (pad_w - 1) / gcd_w + 1;
+  const long gcd_scale_h = ((long) get_global_id(1)) % input_h_scaled + (pad_h - 1) / gcd_h + 1;
+  const long c_id = ((long) get_global_id(1)) / input_h_scaled;
+
+  const long w_index = gcd_scale_w * gcd_w - pad_w;
+  const long h_index = gcd_scale_h * gcd_h - pad_h;
+  const long th_step = stride_h * dilation_h / gcd_h;
+  const long th_begin = grid_ceil(max(-stride_bez_h * gcd_scale_h * stride_h,
+                                     (dilation_bez_h * gcd_scale_h - kernel_h + 1) * dilation_h),
+                                 th_step);
+  const long th_end = min((output_h - stride_bez_h * gcd_scale_h) * stride_h,
+                         (dilation_bez_h * gcd_scale_h + 1) * dilation_h);
+  const long tw_step = stride_w * dilation_w / gcd_w;
+  const long tw_begin = grid_ceil(max(-stride_bez_w * gcd_scale_w * stride_w,
+                                     (dilation_bez_w * gcd_scale_w - kernel_w + 1) * dilation_w),
+                                 tw_step);
+  const long tw_end = min((output_w - stride_bez_w * gcd_scale_w) * stride_w,
+                         (dilation_bez_w * gcd_scale_w + 1) * dilation_w);
+  if (w_index < input_w && c_id < channels) {
+    float val = 0;
+    for (long th = th_begin; th < th_end; th += th_step) {
+      for (long tw = tw_begin; tw < tw_end; tw += tw_step) {
+        const long kh_id = -th / dilation_h + dilation_bez_h * gcd_scale_h;
+        const long kw_id = -tw / dilation_w + dilation_bez_w * gcd_scale_w;
+        const long h_id = th / stride_h + stride_bez_h * gcd_scale_h;
+        const long w_id = tw / stride_w + stride_bez_w * gcd_scale_w;
+        const long kernel_index = (kernel_flip)
+                               ? kernel_h * kernel_w - kw_id - kernel_w * kh_id - 1
+                               : kw_id + kernel_w * kh_id;
+        const long patch_index = w_id + output_w * h_id;
+        const long output_index = patch_index + kernel_index * output_w * output_h +
+                                 c_id * output_w * output_h * kernel_h * kernel_w;
+        val += col_buffer[output_index + col_offset];
+      }
+    }
+
+    // Accumulates the resulting value with the existing im-buffer (+= val)
+    const long input_index = w_index + input_w * (h_index + input_h * c_id);
+    float im_buffer_value = im_buffer[input_index + im_offset];
+    im_buffer[input_index + im_offset] = im_buffer_value + val;
+  }
+}
+
+// =================================================================================================
+
+// Kernel flip version of the Xcol2im kernel (for convolution)
+//#if RELAX_WORKGROUP_SIZE == 1
+  __kernel
+//#else
+  //__kernel __attribute__((reqd_work_group_size(COPY_DIMX, COPY_DIMY, 1)))
+//#endif
+void Xcol2imKernelFlip(const long input_h, const long input_w, const long channels,
+                       const long output_h, const long output_w,
+                       const long kernel_h, const long kernel_w,
+                       const long pad_h, const long pad_w,
+                       const long stride_h, const long stride_w,
+                       const long dilation_h, const long dilation_w,
+                       const long stride_bez_h, const long stride_bez_w,
+                       const long dilation_bez_h, const long dilation_bez_w,
+                       const long gcd_h, const long gcd_w,
+                       const __global float* restrict col_buffer, const long col_offset,
+                       __global float* im_buffer, const long im_offset) {
+  const bool kernel_flip = true;
+  xcol2im(input_h, input_w, channels, output_h, output_w, kernel_h, kernel_w,
+          pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w,
+          stride_bez_h, stride_bez_w, dilation_bez_h, dilation_bez_w, gcd_h, gcd_w,
+          kernel_flip,
+          col_buffer, col_offset, im_buffer, im_offset);
+}
+
+// Normal version of the Xcol2im kernel (for cross-correlation)
+//#if RELAX_WORKGROUP_SIZE == 1
+  __kernel
+//#else
+  //__kernel __attribute__((reqd_work_group_size(COPY_DIMX, COPY_DIMY, 1)))
+//#endif
+void Xcol2imKernelNormal(const long input_h, const long input_w, const long channels,
+                         const long output_h, const long output_w,
+                         const long kernel_h, const long kernel_w,
+                         const long pad_h, const long pad_w,
+                         const long stride_h, const long stride_w,
+                         const long dilation_h, const long dilation_w,
+                         const long stride_bez_h, const long stride_bez_w,
+                         const long dilation_bez_h, const long dilation_bez_w,
+                         const long gcd_h, const long gcd_w,
+                         const __global float* restrict col_buffer, const long col_offset,
+                         __global float* im_buffer, const long im_offset) {
+  const bool kernel_flip = false;
+  xcol2im(input_h, input_w, channels, output_h, output_w, kernel_h, kernel_w,
+          pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w,
+          stride_bez_h, stride_bez_w, dilation_bez_h, dilation_bez_w, gcd_h, gcd_w,
+          kernel_flip,
+          col_buffer, col_offset, im_buffer, im_offset);
+}
+
+
 

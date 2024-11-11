@@ -18,12 +18,11 @@ uses
 
 const
   READ_BATCH   : SizeInt = 32;
-  READ_MEASURE : SizeInt = 8;
+  READ_MEASURE : SizeInt = 32;
   READ_TEST    : SizeInt = 3;
 var
   Neural:TNNet;
   CF10 : TCIFAR10Data;
-  t1, l1:TSingleTensor;
   i, j, k, l :SizeInt;
   Data : TData;
   cost :single;
@@ -70,27 +69,46 @@ end;
 
 var
   img : TImageData;
+  l1, t1, t2, t3, t4 : TSingleTensor;
   coor : TArray<SizeInt>;
   trainingHistory : TSingleTensor;
 begin
   //write(#$1B'[1J');
 {$ifdef USE_OPENCL}
   TSingleTensor.defaultDevice := cdOpenCL;
-  ocl.ActivePlatformId:=1;
+  initOpenCL(0);
+  writeln('Using : ',  ocl.PlatformName(ocl.ActivePlatformId));
+  writeln('  - Device            : ',  ocl.DeviceName(ocl.ActiveDeviceId));
+
+  ocl.queueInOrder:=true;
+  writeln('  - out of Order mode : ', not ocl.queueInOrder);
 {$endif}
-  sDigits := 0;
+  sDigits := 6;
 
   //sleep(500);
   ////img.loadFromFile(['../../../../../data/dog.jpg', '../../../../../data/eagle.jpg'], 416, 416);
-  //////img.loadFromFile('../../../../../data/dog.jpg');
-  //t1.resize([4, 32, 32]);
-  //t1.Fill(0, 0.02);
-  //coor := t1.plot;
-  //write(#$1B'[',1+coor[0],'C', #$1B'[',1+coor[1],'A');
-  //t1.print(1);
-  ////
+  //img.loadFromFile('../../../../../data/dog.jpg');
+  //t1 := img.toTensor();
+  //t1.printStat;
+  //t1.im2Col(5, 5, 2, 2, 1, 1, 1, 1, t2);
+  //t2.SaveToImage('tmp.bmp');
+  //ShellExecute(0, 'open', 'tmp.bmp', '', '', 0);
+  //readln;
+  //t3.col2Im(5, 5, 2, 2, 1, 1, 1, 1, t2);
+  //t3.printStat;
+  //t3.SaveToImage('tmp.bmp');
+  //ShellExecute(0, 'open', 'tmp.bmp', '', '', 0);
+  //readln;
+  //t2.pushToDevice;
+  //ocl.fill(t3.size(), t3.devData, 0, 1);
+  //ocl.col2im(3, t3.h, t3.w, 5, 5, 2, 2, 1, 1, 1, 1, t2.devData, 0, t3.devData, 0);
+  //t3.pullFromDevice();
+  //t3.printStat;
+  //t3.SaveToImage('tmp.bmp');
+  //ShellExecute(0, 'open', 'tmp.bmp', '', '', 0);
   //readln;
   //exit;
+
   {$ifdef USE_TELEMETRY}
   benchmark:=true;
   {$endif}
@@ -121,8 +139,8 @@ begin
   Randomize;
 
   s := clock();
-  predicted.resize([ READ_MEASURE * Neural.batch]);
-  truth.resize([ READ_MEASURE * Neural.batch]);
+  predicted.resize([Neural.batch]);
+  truth.resize([Neural.batch]);
   InitKeyboard;
   while true do begin
 
@@ -133,7 +151,7 @@ begin
     CF10.TrainingData.toSingles(t1.Data);
     CF10.TrainingLabels.toSingles(l1.Data);
 
-    t1.Normalize();//FusedMultiplyAdd(1/128, -1);
+    t1.maxNormalize(1);//FusedMultiplyAdd(1/128, -1);
 
     data.x.Data :=t1.Data;
     data.y.Data :=l1.Data;
@@ -145,9 +163,6 @@ begin
     output := Neural.output();
     sampled.ShallowCopy(Neural.truth);
 
-    output.argMax(Predicted.data + (j mod READ_MEASURE) * Neural.batch);
-    sampled.argMax(Truth.data + (j mod READ_MEASURE) * Neural.batch);
-
     k := PollKeyEvent;
     if keyPressed then
       Break;
@@ -158,12 +173,16 @@ begin
       costDelta := costDelta - cost;
       s :=  READ_MEASURE * CLOCKS_PER_SEC div (clock - s);
       inc(l);
+
+      output.pullFromDevice;
+      output.argMax(Predicted.data);
+      sampled.argMax(Truth.data);
+
       trainingHistory.resize([l]);
       trainingHistory.Data[l-1] := cost;
       write(#$1B'[1H');
       writeln('Batch [',j:4,'], epoch[',j*Neural.batch div CF10.DATA_COUNT:5,'], Cost [',cost:1:8,']',widechar($2191 +2*ord(costDelta>0)),' speed [', s*Neural.batch :5,'] Sample per second, '
         ,'Accuracy [', 100*truth.similarity(predicted.Data):3:2,'%], learningRate [',Neural.computeCurrentLearningRate:1:3,']', sLineBreak);
-      writeln('[gradients] SumAbsDiff : ', sumadiff);
       //writeln('Conv[1] ');
       //Neural.layers[0].weights.print(true, 18);
       //Neural.layers[0].biases.print(true);
@@ -190,6 +209,7 @@ begin
 
       write(#$1B'[',24,';',1,'H');
       writeln(sLineBreak, metrics.print({TELEMETRY_OPS or }TELEMETRY_FWD or TELEMETRY_BWD or TELEMETRY_UPD));
+
 
       metrics.reset;
       //writeln(sLineBreak, 'Predicted :');

@@ -8,9 +8,9 @@ interface
 uses
   SysUtils, Math
   ,ntensors, NTypes, nBaseLayer
-  {$ifdef USE_OPENCL}
-  , opencl, clblast, OpenCLHelper
-  {$endif}
+{$ifdef USE_OPENCL}
+  {$ifdef CL_BLAST} , clblast {$endif}
+{$endif}
   ;
 
 type
@@ -284,7 +284,6 @@ end;
 //const clearscr=#$1B'[2J'#$1B'[2;1H';
 procedure TConnectedLayer.forwardGPU(var state: TNNetState);
 var ip,t,w:TSingleTensor;
-    ev : array[0..15] of cl_event;
 begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.forward.start(layerType);
@@ -306,29 +305,42 @@ begin
   if not biases.wasGPU() then  begin
       biases.pushToDevice;
   end;
-  ev[0]:=nil;
   output.setOCL;
-  //ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeYes
-  //        , batch, outputs, inputs, 1
-  //        , state.input.devData, 0, inputs
-  //        , weights.devData    , 0, inputs
-  //        , 0, output.devData  , 0, outputs
-  //        , @ocl.ActiveQueue
-  //        , nil//@ev[0]
-  //        ));  ocl.checkError();
-
+  {$IFDEF CL_BLAST}
+  ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeYes
+          , batch, outputs, inputs, 1
+          , state.input.devData, 0, inputs
+          , weights.devData    , 0, inputs
+          , 0, output.devData  , 0, outputs
+          , @ocl.ActiveQueue
+          {$IFDEF CL_EVENTS}
+          , pointer(state.events));
+          {$ELSE}
+           , nil));
+          {$ENDIF}
+          ocl.checkError();
+  {$ELSE}
   ocl.gemm(false, true
           , batch, outputs, inputs, 1
           , state.input.devData, 0, inputs
           , weights.devData    , 0, inputs
           , 0, output.devData  , 0, outputs
-          , 0
-          , nil
-          , nil//@ev[0]
-          );
+          {$IFDEF CL_EVENTS}
+          , 1, pointer(state.events), pointer(state.events));
+          {$ELSE}
+          , 0, nil, nil);
+          {$ENDIF}
+  {$ENDIF}
 
+  //TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans
+  //          , batch, outputs, inputs, 1
+  //          , state.input.Data, inputs
+  //          , weights.Data    , inputs
+  //          , 0, output.Data  , outputs
+  //          );
 
   //ocl.finish();
+  //ocl.waitForEvents(batch, pointer(events));
   {$ifdef USE_TELEMETRY}
   if benchmark then tensorMetrics.finish(opGemm);
   {$endif}
@@ -355,25 +367,31 @@ begin
   end;
 
   ocl.forwardBias(output.groupSize(), output.devData, 1, biases.devData, 1, output.groups
-  , 0  // 1
-  , nil//@ev[0]
-  , nil//@ev[1]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(state.events), pointer(state.events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
   //ocl.finish();
+  //ocl.waitForEvents(batch, pointer(events));
+
 
   ocl.ActivateArray(output.devData, output.size, longint(ActivationType)
-  , 0  //1
-  , nil//@ev[1]
-  , nil//@ev[2]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(state.events), pointer(state.events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+
+  //Activate;
+  //output.pullFromDevice(t);
+  //writeln(state.index, ' FC FW: ');
+  //t.printStat();
+  //output.printStat();
+  //writeln(' sumSQRDiff : ', t.sumSqrDiff(output):1:6);
+  //readln;
   //ocl.finish();
-
-  //ocl.waitForEvents(3, @ev[0]);
-  //ocl.freeEvents(3, @ev[0]);
-  //ocl.finish();
-
-
-  //ocl.freeEvents(3, @ev);
+  //ocl.waitForEvents(batch, pointer(events));
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.forward.finish(layerType);
   {$endif}
@@ -381,40 +399,35 @@ end;
 
 procedure TConnectedLayer.backwardGPU(var state: TNNetState);
 var t:TSingleTensor;
-    ev : array[0..15] of cl_event;
+
 begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.start(layerType);
   {$endif}
 
-  if not delta.wasGPU() then
-      delta.pushToDevice;
-
-  if not state.input.wasGPU() then
-      state.input.pushToDevice;
-
-  if not output.wasGPU() then
-      output.pushToDevice;
-
-  if not bias_updates.wasGPU() then
-      bias_updates.pushToDevice;
-
-  if not weight_updates.wasGPU() then
-      weight_updates.pushToDevice;
+  if not delta.wasGPU() then delta.pushToDevice;
+  if not state.input.wasGPU() then state.input.pushToDevice;
+  if not output.wasGPU() then output.pushToDevice;
+  if not bias_updates.wasGPU() then bias_updates.pushToDevice;
+  if not weight_updates.wasGPU() then weight_updates.pushToDevice;
 
 
   ocl.DeriveArray(output.devData, output.size, longint(ActivationType), delta.devData
-  , 0
-  , nil
-  , nil//@ev[0]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(state.events), pointer(state.events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
 
-  ocl.backwardBias(bias_updates.size, bias_updates.devData, 1, delta.devData, 1, delta.Groups
-  , 0  //1
-  , nil//@ev[0]
-  , nil//@ev[1]
-  );
+  ocl.backwardBias(bias_updates.size, bias_updates.devData, 1, delta.devData, 1, batch
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(state.events), pointer(state.events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
 
   if isBatchNormalized and (batch > 1) then begin
@@ -431,57 +444,82 @@ begin
   if benchmark then tensorMetrics.start(opGemm);
   {$endif}
 //
-  //ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeYes, CLBlastTransposeNo
-  //    , outputs, inputs, batch, 1
-  //    , delta.devData, 0, outputs
-  //    , state.input.devData, 0, inputs
-  //    , 1, weight_updates.devData, 0, inputs, @ocl.ActiveQueue
-  //    , nil//@ev[0]
-  //    )); ocl.checkError();
-
+  {$IFDEF CL_BLAST}
+  ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeYes, CLBlastTransposeNo
+      , outputs, inputs, batch, 1
+      , delta.devData, 0, outputs
+      , state.input.devData, 0, inputs
+      , 1, weight_updates.devData, 0, inputs, @ocl.ActiveQueue
+      {$IFDEF CL_EVENTS}
+      , pointer(state.events));
+      {$ELSE}
+       , nil));
+      {$ENDIF}
+      ocl.checkError();
+  {$ELSE}
   ocl.gemm(true, false
     , outputs, inputs, batch, 1
     , delta.devData, 0, outputs
     , state.input.devData, 0, inputs
     , 1, weight_updates.devData, 0, inputs
-    , 0//1
-    , nil//@ev[0]
-    , nil//@ev[0]
-    );
-
-    //ocl.finish();
+    {$IFDEF CL_EVENTS}
+    , 1, pointer(state.events), pointer(state.events));
+    {$ELSE}
+     , 0, nil, nil);
+    {$ENDIF}
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
 
   if assigned(state.delta) and assigned(state.delta^.devData) then begin
-      if not weights.wasGPU then
-          weights.pushToDevice;
-      //ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo
-      //    , batch, inputs, outputs, 1
-      //    , delta.devData, 0, outputs
-      //    , weights.devData, 0, inputs
-      //    , 1, state.delta.devData, 0, inputs, @ocl.ActiveQueue
-      //    , nil//@ev[0]
-      //    ));  ocl.checkError();
+      if not weights.wasGPU then weights.pushToDevice;
+      //if not state.delta.wasGPU() then state.delta.pushToDevice;
+   {$IFDEF CL_BLAST}
+   ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo
+          , batch, inputs, outputs, 1
+          , delta.devData, 0, outputs
+          , weights.devData, 0, inputs
+          , 1, state.delta.devData, 0, inputs, @ocl.ActiveQueue
+          {$IFDEF CL_EVENTS}
+          , pointer(state.events));
+          {$ELSE}
+           , nil));
+          {$ENDIF}
+      ocl.checkError();
+   {$ELSE}
       ocl.gemm( false, false
           , batch, inputs, outputs, 1
           , delta.devData, 0, outputs
           , weights.devData, 0, inputs
           , 1, state.delta.devData, 0, inputs
-          , 0//1
-          , nil//@ev[0]
-          , nil//@ev[0]
-          );
+          {$IFDEF CL_EVENTS}
+          , 1, pointer(state.events), pointer(state.events));
+          {$ELSE}
+          , 0, nil, nil);
+          {$ENDIF}
+   {$ENDIF}
+      //ocl.waitForEvents(batch, pointer(events));
+      //ocl.finish();
 
   end ;
-  //ocl.waitForEvents(2, @ev[0]);
-  //ocl.freeEvents(2, @ev[0]);
-  //ocl.finish();
-  //ocl.freeEvents(1, @ev[0]);
 
+  //backward(state);
+  //writeln(slinebreak,state.index,' FC delta :');
+  //delta.pullFromDevice(t);
+  //delta.printStat(); t.printStat();
+  //writeln(' diff : ', t.sumSqrDiff(delta):1:6);
+  //t.free;
+  //writeln(state.index,' FC state.delta :');
+  //state.delta.pullFromDevice(t);
+  //state.delta.printStat(); t.printStat();
+  //writeln(' diff : ', t.sumSqrDiff(state.delta^):1:6);
+  //readln;
+
+  //ocl.waitForEvents(batch, pointer(events));
 
   {$ifdef USE_TELEMETRY}
    if benchmark then tensorMetrics.finish(opGemm);
   {$endif}
-
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(layerType);
   {$endif}
@@ -489,64 +527,69 @@ begin
 end;
 
 procedure TConnectedLayer.updateGPU(const args: TUpdateArgs);
-var t:TSingleTensor;
-    ev : array[0..15] of cl_event;
+var t : TSingleTensor;
 begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.update.start(layerType);
   {$endif}
 
-  if not biases.wasGPU() then
-      biases.pushToDevice;
-  if not bias_updates.wasGPU() then
-      bias_updates.pushToDevice;
-  if not weights.wasGPU() then
-      weights.pushToDevice;
-  if not weight_updates.wasGPU() then
-      weight_updates.pushToDevice;
+  if not biases.wasGPU() then biases.pushToDevice;
+  if not bias_updates.wasGPU() then bias_updates.pushToDevice;
+  if not weights.wasGPU() then weights.pushToDevice;
+  if not weight_updates.wasGPU() then weight_updates.pushToDevice;
 
   ocl.axpy(biases.Size(), args.learningRate / args.batch, bias_updates.devData, 1, biases.devData, 1
-  , 0
-  , nil
-  , nil //@ev[0]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events) );
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
 
   ocl.scale(bias_updates.Size(), args.momentum, bias_updates.devData, 1
-  , 0  //1
-  , nil//@ev[0]
-  , nil//@ev[1]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events) );
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
-  if isBatchNormalized and (batch > 1) then begin
-      scales.axpy(args.learningRate / args.batch, scale_updates);
-
-      scale_updates.Multiply(args.momentum);
-  end;
 
   ocl.axpy(weight_updates.Size(), -args.decay * args.batch, weights.devData, 1, weight_updates.devData, 1
-  , 0
-  , nil
-  , nil//@ev[2]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events) );
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
 
   ocl.axpy(weights.Size(), args.learningRate / args.batch, weight_updates.devData, 1, weights.devData, 1
-  , 0  //1
-  , nil//@ev[2]
-  , nil//@ev[2]
-  );
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events) );
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
 
   ocl.scale(weight_updates.size(), args.momentum, weight_updates.devData, 1
-  , 0//1
-  , nil//@ev[2]
-  , nil//@ev[2]
-  );
-  //ocl.waitForEvents(3, @ev[0]);
-  //ocl.freeEvents(3, @ev[0]);
+  {$IFDEF CL_EVENTS}
+  , 1, pointer(events), pointer(events) );
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
   //ocl.finish();
-  //ocl.freeEvents(5, @ev[0]);
+
+  if isBatchNormalized and (batch > 1) then begin
+      scales.axpy(args.learningRate / args.batch, scale_updates);
+      scale_updates.Multiply(args.momentum);
+  end;
+
+  //update(args);
+  inherited ;
 
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.update.finish(layerType);

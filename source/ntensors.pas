@@ -12,10 +12,11 @@
   {$ifdef MSWINDOWS}{$FPUType AVX2}
   {$endif}
 {$else}
-{$excessprecision off}
 {$endif}
+{$excessprecision off}
 {$pointermath on}
 {$WRITEABLECONST ON}
+{$define USE_FMA}
 {$M+}
 
 interface
@@ -51,7 +52,7 @@ uses Classes, SysUtils, TypInfo, Generics.Defaults, syncobjs, Math
   {$ifdef USE_OPENCL}
   , OpenCL
   , OpenCLHelper
-  , clblast
+  {$ifdef CL_BLAST} , clblast {$endif}
   {$endif}
   {$ifdef USE_TELEMETRY}
   , nChrono
@@ -572,7 +573,7 @@ type
     {$endif}
     procedure pushToDevice;
     procedure pullFromDevice; overload;
-    procedure pullFromDevice(dst :TTensor<T>); overload;
+    procedure pullFromDevice(var dst :TTensor<T>); overload;
 
     //procedure convertTo<C>(var Trnsor:TTensor<C>);
     procedure Fill(const val: T; const interval: T; const stride: SizeInt = 1;
@@ -920,9 +921,9 @@ type
       const Descending: boolean = False); static;
   end;
 
-{$if defined(CPUX64)}
-procedure nn_fast(const A, B, C:PSingle; const ALPHA:single; const lda, ldb, ldc, i, CN, k:IntPtr);assembler;
-  {$endif}
+//{$if defined(CPUX64)}
+//procedure nn_fast(const A, B, C:PSingle; const ALPHA:single; const lda, ldb, ldc, i, CN, k:IntPtr);assembler;
+//  {$endif}
 
 procedure cblas_sgemm(const Order: CBLAS_LAYOUT; const TransA, TransB: CBLAS_TRANSPOSE;
   const M, N, K: SizeInt; const ALPHA: single; const A: PSingle;
@@ -1024,6 +1025,9 @@ function WriteConsole(hConsoleOutput: THandle; const lpBuffer: Pointer;
 {$endif}
 
 {$ifdef USE_OPENCL}
+
+procedure initOpenCL(const platformId :SizeInt=0; const deviceId: SizeInt=0);
+
 var
   ocl    : TOpenCL;
 {$endif}
@@ -1477,16 +1481,77 @@ begin
 
 end;
 
+
 const
   TILE_M = 4; // four operations
-
-const
-  TILE_N = 16;  // AVX 2 operations * 8 (8 singles);
-
-const
+  TILE_N = 16;  // AVX2 operations * 4<(sizeoof(single));
   TILE_K = 16;  // loops
-
 {$if defined(CPUX64)}
+
+procedure mad(const dst:PSingle; const src1: single; const src2:PSingle);  vectorcall;
+inline;
+begin
+  dst[0] += src1 * src2[0];
+  dst[1] += src1 * src2[1];
+  dst[2] += src1 * src2[2];
+  dst[3] += src1 * src2[3];
+  dst[4] += src1 * src2[4];
+  dst[5] += src1 * src2[5];
+  dst[6] += src1 * src2[6];
+  dst[7] += src1 * src2[7];
+end;
+//assembler; nostackframe;
+//asm
+//  vbroadcastss  ymm0, src1
+//  vmovups       ymm1, yword [dst]
+//  vfmadd231ps   ymm1, ymm0, yword [src2]
+//  vmovups       yword [dst], ymm1
+//end;
+
+
+
+procedure nn_stable(const A, B, C:PSingle; const ALPHA:single; const lda, ldb, ldc, i, CN, k:IntPtr);
+var j, kk : SizeInt;
+  A1, A2, A3, A4 : single;
+  C1, C2, C3, C4, C5, C6, C7, C8, B1, B2 : PSingle;
+begin
+
+j := 0;
+  while j< CN do begin
+
+    C1 := C + i*ldc + j          ;
+    C2 := C + i*ldc + j+8        ;
+
+    C3 := C + (1+i)*ldc + j      ;
+    C4 := C + (1+i)*ldc + j+8    ;
+
+    C5 := C + (2+i)*ldc + j      ;
+    C6 := C + (2+i)*ldc + j+8    ;
+
+    C7 := C + (3+i)*ldc + j      ;
+    C8 := C + (3+i)*ldc + j+8    ;
+
+    for kk :=k to TILE_K + k-1  do begin
+      A1 := A[(i+0)*lda + kk] * ALPHA ;
+      A2 := A[(i+1)*lda + kk] * ALPHA ;
+      A3 := A[(i+2)*lda + kk] * ALPHA ;
+      A4 := A[(i+3)*lda + kk] * ALPHA ;
+      B1 := B + (kk) * ldb + j        ;
+      B2 := B + (kk) * ldb + j +8     ;
+
+      mad(C1, A1, B1);
+      mad(C2, A1, B2);
+      mad(C3, A2, B1);
+      mad(C4, A2, B2);
+      mad(C5, A3, B1);
+      mad(C6, A3, B2);
+      mad(C7, A4, B1);
+      mad(C8, A4, B2);
+    end;
+    inc(j, TILE_N)
+  end
+end;
+
 procedure nn_fast(const A, B, C:PSingle; const ALPHA:single; const lda, ldb, ldc, i, CN, k:IntPtr);assembler;
 asm
 // save non-volatile registers to stack
@@ -1495,6 +1560,7 @@ asm
   push               r14
   push               r15
 {$ifdef MSWINDOWS}
+
   sub                  rsp      , 16*10                     // making stackspace to save xmm6-15
   vmovdqu              [rsp+$00], xmm6
   vmovdqu              [rsp+$10], xmm7
@@ -1513,7 +1579,7 @@ asm
 @while_n:
   mov                r11      , i
   imul               r11      , ldc
-  add                r11      , r10                       // (i*0)*ldc + j
+  add                r11      , r10                       // (0+i)*ldc + j
   mov                r12      , r11
   add                r11      , ldc                       // (1+i)*ldc + j
   mov                r13      , r11
@@ -1525,8 +1591,8 @@ asm
   vmovups            ymm8     , yword [C + 4 * r12]       // C[i*ldc + j]
   vmovups            ymm10    , yword [C + 4 * r12 + 32]  // C[i*ldc + j+8]
 
-  vmovups            ymm9     , yword [C + 4 * r13]       // (1+i)*ldc + j
-  vmovups            ymm11    , yword [C + 4 * r13 + 32]  // (1+i)*ldc + j+8
+  vmovups            ymm9     , yword [C + 4 * r13]       // C[(1+i)*ldc + j]
+  vmovups            ymm11    , yword [C + 4 * r13 + 32]  // C[(1+i)*ldc + j+8]
 
   vmovups            ymm12    , yword [C + 4 * r14]       // C[(2+i)*ldc + j]
   vmovups            ymm14    , yword [C + 4 * r14 + 32]  // C[(2+i)*ldc + j+8]
@@ -1562,53 +1628,71 @@ asm
   vmulss             xmm4     , ALPHA  ,  dword [A + 4 * rax] // A[(i+3)*lda + k] * ALPHA
   vbroadcastss       ymm4     , xmm4
 
+
   mov                rax      , k
   add                rax      , r11
   imul               rax      , ldb                       // k * ldb
   add                rax      , r10                       // k * ldb + j
-  vmovups            ymm6     , yword [B + 4 * rax]       // B[k * ldb + j]
-  vmovups            ymm7     , yword [B + 4 * rax + 32]  // B[k * ldb + j+8]
+  //vmovups            ymm6     , yword [B + 4 * rax]       // B[k * ldb + j]
+  //vmovups            ymm7     , yword [B + 4 * rax + 32]  // B[k * ldb + j+8]
+
+{$ifdef USE_FMA}
 {$if defined(UNIX) or defined(POSIX)}
-  vfmadd231ps        ymm8     , ymm3    , ymm6
-  //vmulps             ymm5     , ymm3    , ymm6
-  //vaddps             ymm8     , ymm8    , ymm5
+  vfmadd231ps        ymm8     , ymm3    , yword [B + 4 * rax]
 
-  vfmadd231ps        ymm10    , ymm3    , ymm7
-  //vmulps             ymm5     , ymm3    , ymm7
-  //vaddps             ymm10    , ymm10   , ymm5
+  vfmadd231ps        ymm10    , ymm3    , yword [B + 4 * rax + 32]
 {$else}
-  vfmadd231ps        ymm8     , ymm0    , ymm6
-  //vmulps             ymm5     , ymm0    , ymm6
-  //vaddps             ymm8     , ymm8    , ymm5
+  vfmadd231ps        ymm8     , ymm0    , yword [B + 4 * rax]
 
-  vfmadd231ps        ymm10    , ymm0    , ymm7
-  //vmulps             ymm5     , ymm0    , ymm7
-  //vaddps             ymm10    , ymm10   , ymm5
+  vfmadd231ps        ymm10    , ymm0    , yword [B + 4 * rax + 32]
 {$endif}
-  vfmadd231ps        ymm9     , ymm1    , ymm6
-  //vmulps             ymm5     , ymm1    , ymm6
-  //vaddps             ymm9     , ymm9    , ymm5
 
-  vfmadd231ps        ymm11    , ymm1    , ymm7
-  //vmulps             ymm5     , ymm1    , ymm7
-  //vaddps             ymm11    , ymm11   , ymm5
+  vfmadd231ps        ymm9     , ymm1    , yword [B + 4 * rax]
 
-  vfmadd231ps        ymm12     , ymm2    , ymm6
-  //vmulps             ymm5     , ymm2    , ymm6
-  //vaddps             ymm12    , ymm12   , ymm5
+  vfmadd231ps        ymm11    , ymm1    , yword [B + 4 * rax + 32]
 
-  vfmadd231ps        ymm14     , ymm2    , ymm7
-  //vmulps             ymm5     , ymm2    , ymm7
-  //vaddps             ymm14    , ymm14   , ymm5
+  vfmadd231ps        ymm12    , ymm2    , yword [B + 4 * rax]
+
+  vfmadd231ps        ymm14    , ymm2    , yword [B + 4 * rax + 32]
 
 
-  vfmadd231ps        ymm13     , ymm4    , ymm6
-  //vmulps             ymm5     , ymm4    , ymm6
-  //vaddps             ymm13    , ymm13   , ymm5
+  vfmadd231ps        ymm13    , ymm4    , yword [B + 4 * rax]
 
-  vfmadd231ps        ymm15     , ymm4    , ymm7
-  //vmulps             ymm5     , ymm4    , ymm7
-  //vaddps             ymm15    , ymm15   , ymm5
+  vfmadd231ps        ymm15    , ymm4    , yword [B + 4 * rax + 32]
+
+{$else}
+{$if defined(UNIX) or defined(POSIX)}
+
+  vmulps             ymm5     , ymm3    , yword [B + 4 * rax]
+  vaddps             ymm8     , ymm8    , ymm5
+
+  vmulps             ymm5     , ymm3    , yword [B + 4 * rax + 32]
+  vaddps             ymm10    , ymm10   , ymm5
+{$else}
+  vmulps             ymm5     , ymm0    , yword [B + 4 * rax]
+  vaddps             ymm8     , ymm8    , ymm5
+
+  vmulps             ymm5     , ymm0    , yword [B + 4 * rax + 32]
+  vaddps             ymm10    , ymm10   , ymm5
+{$endif}
+  vmulps             ymm5     , ymm1    , yword [B + 4 * rax]
+  vaddps             ymm9     , ymm9    , ymm5
+
+  vmulps             ymm5     , ymm1    , yword [B + 4 * rax + 32]
+  vaddps             ymm11    , ymm11   , ymm5
+
+  vmulps             ymm5     , ymm2    , yword [B + 4 * rax]
+  vaddps             ymm12    , ymm12   , ymm5
+
+  vmulps             ymm5     , ymm2    , yword [B + 4 * rax + 32]
+  vaddps             ymm14    , ymm14   , ymm5
+
+  vmulps             ymm5     , ymm4    , yword [B + 4 * rax]
+  vaddps             ymm13    , ymm13   , ymm5
+
+  vmulps             ymm5     , ymm4    , yword [B + 4 * rax + 32]
+  vaddps             ymm15    , ymm15   , ymm5
+{$endif}
 
   inc                r11
   cmp                r11      , TILE_K
@@ -1622,9 +1706,11 @@ asm
   vmovups            yword [C + 4 * r14 + 32] , ymm14  // C[(2+i)*ldc + j+8]
   vmovups            yword [C + 4 * r15]      , ymm13  // C[(3+i)*ldc + j]
   vmovups            yword [C + 4 * r15 + 32] , ymm15  // C[(3+i)*ldc + j+8]
+
   add                r10    , TILE_N
   cmp                r10    , CN
   jl                 @while_n
+
 //restore non-volatile registers
 {$ifdef MSWINDOWS}
   vmovdqu            xmm6   , [rsp+$00]
@@ -1676,6 +1762,7 @@ begin
   kk    :=0;
   while kk < CK do begin
       nn_fast(A, B, C, ALPHA, lda, ldb, ldc,idx, CN, kk);
+      //nn_stable(A, B, C, ALPHA, lda, ldb, ldc,idx, CN, kk);
       for i_d:=idx to idx+TILE_M -1 do
           for k_d:=kk to kk + TILE_K-1 do begin
               A_PART := ALPHA*A[i_d*lda + k_d];
@@ -1840,12 +1927,16 @@ begin
   {$endif}
 end;
 
+const
+  TILEN :SizeInt = 8;
+  TILEK :SizeInt = 4;
+  TILEM :SizeInt = 4;
 procedure s_nn(const f, t: IntPtr; const ptr: pointer);
 var
-  i, j, kk, K, N, lda, ldb, ldc: IntPtr;
+  i, j, kk, tj, tk, M, N, K, lda, ldb, ldc, DM, RM, DN, RN, DK ,RK: IntPtr;
   A_PART, ALPHA: single;
   p: PMPParams absolute ptr;
-  A, B, C: PSingle;
+  A, B, C, AA, BB, CC: PSingle;
 begin
   //     K          N          N
   //   [...]      [...]      [...]
@@ -1860,14 +1951,56 @@ begin
   ldc := PIntPtr(p.G)^;
   K := PIntPtr(p.K)^;
   N := PIntPtr(p.N)^;
-  for i := f to t do     // m
-    for kk := 0 to K - 1 do
-    begin
-      A_PART := ALPHA * A[i * lda + kk];
-      saxpy(N, A_PART, B + kk * ldb, C + i * ldc);
-      //for j:=0 to N-1 do
-      //    C[i*ldc + j]:=C[i*ldc + j] + A_PART*B[kk*ldb + j];
+  M := PIntPtr(p.M)^;
+
+  DM := M div TILEM;
+  DN := N div TILEN;
+  DK := K div TILEK;
+
+  RM := TILEM * DM;
+  RN := TILEN * DN;
+  RK := TILEK * DK;
+
+  inc(C, f*ldc);
+  inc(A, f*lda);
+  for i := f to t do  begin   // m
+    for kk := 0 to K - 1 do begin
+      A_PART := ALPHA*A[kk];
+      saxpy(N, A_PART, B + kk*ldb, C);
     end;
+    //for kk := 0 to DK -1 do begin
+    //  AA := A + kk*TILEK;
+    //  for j:=0 to DN -1 do begin
+    //    BB := B + kk*TILEK*ldb + j*TILEN;
+    //    CC := C + j*TILEN;
+    //    for tk :=0 to TILEK-1 do begin
+    //      A_PART := ALPHA * AA[tk];
+    //      //saxpy(TILEN, A_PART, BB, CC);
+    //      for tj:=0 to TILEN -1 do
+    //        CC[tj] := CC[tj] + A_PART*BB[tj];
+    //      inc(BB, ldb)
+    //    end;
+    //  end;
+    //  for tk :=0 to TILEK-1 do begin
+    //    A_PART := ALPHA * AA[tk];
+    //    BB := B + (kk*TILEK + tk)*ldb + RN;
+    //    CC := C + RN;
+    //    //saxpy(N - RN, A_PART, BB, C);
+    //    for j:= 0 to N - RN -1 do
+    //      CC[j] := CC[j] + A_PART*BB[j];
+    //  end;
+    //end;
+    //for tk := RK to K - 1 do begin
+    //  A_PART := ALPHA*A[tk];
+    //  BB := B + tk*ldb;
+    //  //saxpy(N, A_PART, BB, C);
+    //  for j:= 0 to N -1 do
+    //    C[j] := C[j] + A_PART*BB[j]
+    //end;
+
+    inc(C, ldc);
+    inc(A, lda)
+  end;
 end;
 
 
@@ -1888,6 +2021,7 @@ begin
   p.G := @ldc;
   p.K := @K;
   p.N := @N;
+  p.M := @M;
   {$if defined(USE_MULTITHREADING)}
   mp.&for(s_nn, 0, M - 1, @p);
   {$else}
@@ -1996,7 +2130,7 @@ begin
 
   if (TransA = CblasNoTrans) and (TransB = CblasNoTrans) then
   // todo fast_gemm is disabled, not 100% accurate!
-  {$if defined(_CPUX64)}
+  {$if defined(BIG_MATRECIES)} // optimized for big matrecies! it will perform close to openblas speed, [CAUSION] : unstable with small matrecies!
     if AVX2Support then
       gemm_nn_fast(M, N, K, ALPHA, A, lda, B, ldb, C, ldc)
     else
@@ -3141,7 +3275,7 @@ begin
 end;
 
 {$if defined(CPUX64)}
-procedure vsAdd(const N:SizeInt; const A, B, C:PSingle);assembler;
+procedure vsAdd_avx2(const N:SizeInt; const A, B, C:PSingle);assembler;
 asm
   mov          rax      ,    N
   shr          rax      ,    3  // div 8
@@ -3172,7 +3306,57 @@ asm
 @done:
 end;
 
+function vssum_avx2(const N:SizeInt; const A:PSingle):single;assembler;
+asm
+  mov          r8       ,    N
+  shr          r8       ,    3  // div 8
+  vxorps       ymm0     ,    ymm0,  ymm0
+  jz           @rem1
+@while1:
+
+  vaddps       ymm0     ,    ymm0,  yword [A]
+  add          A        ,    8*4
+  dec          r8
+  jnz         @while1
+
+@rem1:
+  vextractf128 xmm1     ,    ymm0,  1
+  addps        xmm0     ,    xmm1
+  haddps       xmm0     ,    xmm0
+  haddps       xmm0     ,    xmm0
+  vzeroupper
+  mov          r8       ,    N
+  and          r8       ,    7
+  jz           @done
+@while2:
+  vaddss       xmm0     ,    xmm0,  dword [A]
+  add          A        ,    4
+  dec          r8
+  jnz         @while2
+@done:
+end;
+
 {$endif}
+
+function vsSumI(const N:SizeInt; const src:PSingle; const stride:SizeInt):single;
+var i:SizeInt;
+begin
+  {$if defined(CPUX64)}
+  if AVX2Support and (stride=1) then
+    exit(vssum_avx2(N, src));
+  {$endif}
+  result := 0;
+  for i:=0 to N-1 do
+    result := result + src[i*stride]
+end;
+
+function vdSumI(const N:SizeInt; const src:PSingle; const stride:SizeInt):single;
+var i:SizeInt;
+begin
+  result := 0;
+  for i:=0 to N-1 do
+    result := result + src[i*stride]
+end;
 
 procedure vsAddI(const N: SizeInt; const a: PSingle; const inca: SizeInt;
   const b: PSingle; const incb: SizeInt; const c: PSingle; const incc: SizeInt);
@@ -3182,7 +3366,7 @@ var
 begin
   {$if defined(CPUX64)}
   if AVX2Support and (inca=1) and (incb=1) and (incc=1) then
-    vsAdd(N, A, B, C)
+    vsAdd_avx2(N, A, B, C)
   else
   {$endif}
   for i := 0 to N - 1 do
@@ -5225,7 +5409,7 @@ begin
 
   {$if defined(USE_OPENCL)}
   //if computingDevice = cdOpenCL then
-    devData := ocl.createDeviceBuffer(sz * sizeOf(T), maUseHost, data);
+    devData := ocl.createDeviceBuffer(sz * sizeOf(T), maReadWrite, nil);
   {$endif}
 end;
 
@@ -5256,7 +5440,19 @@ begin
   Result := lastOP <> cdCPU;
 end;
 
+
 {$if defined(USE_OPENCL)}
+procedure initOpenCL(const platformId :SizeInt; const deviceId: SizeInt);
+begin
+    if not assigned(ocl) then begin
+      ocl:= TOpenCL.Create(dtALL);
+      ocl.LoadFromFile(GetCurrentDir + '/../../../../NN/source/cl_sgemm.c' );
+    end;
+    ocl.ActivePlatformId := platformId;
+    ocl.ActiveDeviceId := deviceId;
+    if not ocl.isBuilt then ocl.build;
+end;
+
 procedure TTensor<T>.setOCL;
 begin
   lastOP := cdOpenCL;
@@ -5266,8 +5462,8 @@ procedure TTensor<T>.setCPU;
 begin
   lastOp := cdCPU;
 end;
-
 {$endif}
+
 procedure TTensor<T>.pushToDevice;
 var
   sz: SizeInt;
@@ -5304,7 +5500,7 @@ begin
   {$endif}
 end;
 
-procedure TTensor<T>.pullFromDevice(dst: TTensor<T>);
+procedure TTensor<T>.pullFromDevice(var dst: TTensor<T>);
 var
   sz: SizeInt;
 begin
@@ -5313,6 +5509,8 @@ begin
   if benchmark then tensorMetrics.start(opDeviceToHost);
   {$endif}
   sz := byteSize();
+  if not assigned(dst.Data) then
+    dst.resize(FShape, groups);
   ocl.FErr := clEnqueueReadBuffer(ocl.ActiveQueue, devData, cl_true, 0, sz, dst.Data, 0, nil, nil);ocl.CheckError();
   //ocl.finish();
   dst.lastOP := cdCPU;
@@ -5580,7 +5778,7 @@ procedure TTensor<T>.CopyTo(const dst: TTensor<T>; const dstOffset: SizeInt;
   N: SizeInt);
 var
   i: SizeInt;
-  d: PT;
+  d, s: PT;
 begin
   if N = 0 then N := Size() div srcStride;
 {$if defined(_USE_OPENCL)}
@@ -5595,9 +5793,10 @@ begin
     exit;
   end;
 
-  D := dst.Data;
+  d := dst.Data + dstOffset;
+  s := Data + srcOffset;
   for i := 0 to N - 1 do
-    d[i * dstStride + dstOffset] := Data[i * srcStride + srcOffset];
+    d[i * dstStride] := s[i * srcStride];
 end;
 
 procedure TTensor<T>.ShallowCopy(const Source: TTensor<T>);
@@ -6031,12 +6230,14 @@ begin
   sd := Size();
   sc := src.size;
   if sd = sc then
-  {$ifdef _USE_OPENCL}
-  if not wasGPU() then pushToDevice();
-  if not src.wasGPU() then src.pushToDevice();
-  ocl.addvv(sd, devData, src.devData);
-  exit;
-  {$else}
+  {$ifdef USE_OPENCL}
+  if computingDevice=cdOpenCL then begin
+    if not wasGPU() then pushToDevice();
+    if not src.wasGPU() then src.pushToDevice();
+    ocl.addvv(sd, devData, src.devData);
+    exit;
+  end else
+  {$endif}
   begin
     addvv(Size(), Data, 1, src.Data, 1, Data, 1);
     {$ifdef USE_TELEMETRY}
@@ -6044,7 +6245,6 @@ begin
     {$endif}
     exit;
   end;
-  {$endif}
   dstBatch := sd > sc;
   if (groups = src.groups) and (src.groups > 1) then
   begin
@@ -6079,10 +6279,10 @@ begin
     blockSize := NBlocks div (grp * N);
   end;
   Assert(grp * N * BlockSize = NBlocks, '[Add] : Tensor sizes doesn''t align');
-  if dstBatch then
+  if dstBatch then    // forward bias
   begin
-    {$ifdef _USE_OPENCL}
-    if computingDevice=cdOpenCL then begin;
+    {$ifdef USE_OPENCL}
+    if computingDevice=cdOpenCL then begin
       if not src.wasGPU() then
         src.pushToDevice;
       if not wasGPU then
@@ -6096,7 +6296,7 @@ begin
     {$endif}
     exit;
   end;
-  {$if defined(_USE_OPENCL)}
+  {$if defined(USE_OPENCL)}
   if computingDevice= cdOpenCL then begin
     if not src.wasGPU() then
       src.pushToDevice;
@@ -6800,7 +7000,7 @@ var
   b, imColSize, k, filters, outImgSize, filt, chan: SizeInt;
   srcIm, dstIm, ker: PT;
   mt: boolean;
-  aOffset, bOffset : SizeInt;
+  aOffset, bOffset : SizeInt;  t:TSingleTensor;
   {$ifdef USE_OPENCL}
   _A, _B, _C: cl_mem; event:Pcl_event;
   {$endif}
@@ -7156,6 +7356,7 @@ var
   aMean, aStdDev: T;
 begin
   MeanAndVar(aMean, aStdDev);
+  if aStdDev=0 then exit;
   aStdDev := Self.sqrt(aStdDev);
   if assigned(normvss) then
     normvss(Size(), Data, aMean, aStdDev)
@@ -9148,13 +9349,13 @@ begin
       S := S + IntToStr(Shape[i])
     end;
   S := S +')';
-  write(sup, S, csi, length(S), 'D', dw);
+  write(sup, sLineBreak{S, csi, length(S), 'D', dw});
   ow:=length(S); oh := 1;
   minMax(amin, amax, outArgMin, outArgMax);
   vcvtd(1, @amin, @minVal);
   vcvtd(1, @amax, @maxVal);
   S := '[min : '+ toStr(amin)+ '@'+ intToStr(outArgMin)+ ', max : '+ toStr(amax)+  '@'+ intToStr(outArgMax)+ ']';
-  write(sup, S, csi, length(S), 'D', dw);
+  write(sup, sLinebreak{S, csi, length(S), 'D', dw});
   ow:=math.max(ow, length(S)); inc(oh);
   _w := w();
   if length(FShape) > 1 then
@@ -9221,13 +9422,13 @@ begin
           end;
         end;
       end;
-      write(S, csi, trunc(scale*_w*tile), 'D' ,dw);
+      write(S, sLineBreak{csi, trunc(scale*_w*tile), 'D' ,dw});
       ow:=math.max(ow, trunc(scale*_w*tile)); inc(oh);
       S := '';
     end;
   end;
   S := #$1B'[0m';
-  write(S);
+  write(S, sLineBreak);
   result := [ow, oh]
 
 end;
@@ -9315,12 +9516,12 @@ begin
   Result := PTypeInfo(TypeInfo(T)).Name;
 end;
 
-procedure si2c2(chan:IntPtr; ptr:Pointer);
+procedure si2c2(idx:IntPtr; ptr:Pointer);
 var
   k, i, j, b, outWidth, outHeight, kernelSize, inSize, outSize,
   kernelCol, kernelRow, outCol, outRow, sizeX,
   kernelWidth, kernelHeight, aChannels, aWidth, dilationX, dilationY,
-  strideX, strideY, padWidth, padHeight, batch: SizeInt;
+  strideX, strideY, padWidth, padHeight, batch, chan: SizeInt;
   im, col, im1, col1: PSingle;
   MT :PMPParams absolute ptr;
 begin
@@ -9345,7 +9546,9 @@ begin
   col           := mt.s;
   //for kernelRow := 0 to kernelHeight - 1 do
   //begin
-    for k := 0 to kernelWidth*kernelHeight - 1 do
+    chan := idx div kernelSize;
+    k    := idx mod kernelSize;
+    //for k := 0 to kernelWidth*kernelHeight - 1 do
     begin
       kernelRow := k div kernelWidth;
       kernelCol := k mod kernelWidth;
@@ -9413,10 +9616,10 @@ begin
 
 {$ifdef USE_MULTITHREADING}
   if multithread then
-    mp2.&for(si2c2, 0, AChannels, @mt)
+    mp2.&for(si2c2, 0, AChannels*kernelSize, @mt)
   else
 {$endif}
-  for chan := 0 to aChannels - 1 do
+  for chan := 0 to aChannels*kernelSize - 1 do
     si2c2(chan, @mt)
 end;
 
@@ -9575,6 +9778,75 @@ begin
   //{$ifdef USE_TELEMETRY} if benchmark then metrics.ops.finish(opIm2colExt);{$endif}
 end;
 
+
+procedure c2i(i: IntPtr; ptr: Pointer);
+var
+  kernel_row, kernel_col, output_rows, output_col, input_row, input_col: SizeInt;
+  Height, Width, kernel_h, kernel_w, pad_h, pad_w, stride_h, stride_w
+  , dilation_h, dilation_w, colOffset, imOffset, batch,
+  output_h, output_w, channel_size, kernel_size, out_channel_size,
+  index, chan:SizeInt;
+  col, im, data_im, data_col: PSingle;
+  p : PMPParams absolute ptr;
+begin
+
+  Height            := PSizeInt(p.A)^;
+  Width             := PSizeInt(p.B)^;
+  kernel_h          := PSizeInt(p.C)^;
+  kernel_w          := PSizeInt(p.D)^;
+  pad_h             := PSizeInt(p.E)^;
+  pad_w             := PSizeInt(p.F)^;
+  stride_h          := PSizeInt(p.G)^;
+  stride_w          := PSizeInt(p.H)^;
+  dilation_h        := PSizeInt(p.I)^;
+  dilation_w        := PSizeInt(p.J)^;
+  colOffset         := PSizeInt(p.K)^;
+  imOffset          := PSizeInt(p.L)^;
+  batch             := PSizeInt(p.M)^;
+  output_h          := PSizeInt(p.N)^;
+  output_w          := PSizeInt(p.O)^;
+  out_channel_size  := PSizeInt(p.P)^;
+  col               := p.Q ;
+  im                := p.R ;
+
+  channel_size      := height*width ;
+  kernel_size       := kernel_h * kernel_w;
+
+  chan  := i div (kernel_size);
+  data_col := col + colOffset + i*out_channel_size;
+  //data_col := col + colOffset + kernel_size*out_channel_size * chan;
+  data_im := im + imOffset + channel_size * chan;
+  index := (i mod kernel_size);
+  kernel_row := index div kernel_w;
+  kernel_col := index mod kernel_w;
+
+  //FillDWord(data_im[0], Height * Width, 0);
+  //for kernel_row :=0 to kernel_h  - 1 do
+  //  for kernel_col :=0 to kernel_w  - 1 do
+    begin
+      input_row := (kernel_row - pad_h) * dilation_h;
+      for output_rows := 0 to output_h - 1 do
+      begin
+        if not SizeUInt(input_row) < SizeUInt(Height) then
+          inc(data_col, output_w)
+        else
+        begin
+          input_col := (kernel_col - pad_w) * dilation_w;
+          for output_col := 0 to output_w - 1 do
+          begin
+            if SizeUInt(input_col) < SizeUInt(Width) then begin
+              index := input_row * Width + input_col;
+              data_im[index] := data_im[index] + data_col[0];
+            end;
+            inc(data_col);
+            inc(input_col, stride_w);
+          end;
+        end;
+        inc(input_row, stride_h);
+      end;
+    end;
+end;
+
 procedure scol2im(const channels, Height, Width, kernel_h, kernel_w,
   pad_h, pad_w, stride_h, stride_w, dilation_h, dilation_w: SizeInt;
   const col: PSingle; const colOffset: SizeInt;
@@ -9582,65 +9854,44 @@ procedure scol2im(const channels, Height, Width, kernel_h, kernel_w,
   const multiThread: boolean = False);
 var
   channel, output_h, output_w, channel_size, out_channel_size, kernel_size: SizeInt;
-  {$ifdef FPC}
-  procedure c2i_ext(idx:IntPtr; ptr:Pointer);
-  {$else}
-  c2i_ext: TThreadProcNested;
-begin
-  // {$ifdef USE_TELEMETRY} if benchmark then metrics.ops.start(opCol2ImExt);{$endif}
-  c2i_ext := procedure(idx: IntPtr; ptr: Pointer)
-  {$endif}
-  var
-    channel, kernel_row, kernel_col, output_rows, output_col, input_row, input_col: SizeInt;
-    data_im, data_col: PSingle;
-  begin
-    data_col := col + colOffset + kernel_size * out_channel_size * idx;
-    data_im := im + imOffset + channel_size * idx;
-    FillDWord(data_im[0], Height * Width, 0);
-    for kernel_row := -pad_h to kernel_h - pad_h - 1 do
-      for kernel_col := -pad_w to kernel_w - pad_w - 1 do
-      begin
-        input_row := kernel_row * dilation_h;
-        for output_rows := 0 to output_h - 1 do
-        begin
-          if not SizeUInt(input_row) < SizeUInt(Height) then
-            Inc(data_col, output_w)
-          else
-          begin
-            input_col := kernel_col * dilation_w;
-            for output_col := 0 to output_w - 1 do
-            begin
-              if SizeUInt(input_col) < SizeUInt(Width) then
-                data_im[input_row * Width + input_col] :=
-                data_im[input_row * Width + input_col] + data_col[0];
-              Inc(data_col);
-              input_col := input_col + stride_w;
-            end;
-          end;
-          Inc(input_row, stride_h);
-        end;
-      end;
-  end;
-
-  {$ifdef FPC}
+  p : TMPParams;
 begin
  //{$ifdef USE_TELEMETRY} if benchmark then metrics.ops.start(opCol2imExt);{$endif}
-  {$else}
-  {$endif}
-  output_h := (Height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) div stride_h + 1;
-  output_w := (Width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) div stride_w + 1;
+  output_h         := (Height + 2 * pad_h - (dilation_h * (kernel_h - 1) + 1)) div stride_h + 1;
+  output_w         := (Width + 2 * pad_w - (dilation_w * (kernel_w - 1) + 1)) div stride_w + 1;
   out_channel_size := output_h * output_w;
-  channel_size := Height * Width;
-  kernel_size := kernel_h * kernel_w;
+  channel_size     := Height * Width;
+  kernel_size      := kernel_h * kernel_w;
+
+  p.A  := @Height           ;
+  p.B  := @Width            ;
+  p.C  := @kernel_h         ;
+  p.D  := @kernel_w         ;
+  p.E  := @pad_h            ;
+  p.F  := @pad_w            ;
+  p.G  := @stride_h         ;
+  p.H  := @stride_w         ;
+  p.I  := @dilation_h       ;
+  p.J  := @dilation_w       ;
+  p.K  := @colOffset        ;
+  p.L  := @imOffset         ;
+  p.M  := @batch            ;
+  p.N  := @output_h         ;
+  p.O  := @output_w         ;
+  p.P  := @out_channel_size ;
+  p.Q  := col               ;
+  p.R  := im                ;
+
+
   {$ifdef USE_MULTITHREADING}
   if MultiThread then
-    mp2.&for(c2i_ext,0, Channels{, @p})
+    mp2.&for(c2i,0, Channels * kernel_size, @p)
   else
-  for channel:=0 to Channels-1 do
-      c2i_ext(channel,{@p}nil);
+  for channel:=0 to Channels*kernel_size-1 do
+    c2i(channel, @p);
   {$else}
-  for channel := 0 to Channels - 1 do
-    c2i_ext(channel,{@p}nil);
+  for channel := 0 to Channels*kernel_size - 1 do
+    c2i(channel,@p);
   {$endif}
   //{$ifdef USE_TELEMETRY} if benchmark then metrics.ops.finish(opCol2imExt);{$endif}
 end;
@@ -9745,6 +9996,10 @@ begin
   ow := (_w + 2 * padWidth - (dilationX * (kernelWidth - 1) + 1)) div strideX + 1;
   oh := (_h + 2 * padHeight - (dilationy * (kernelHeight - 1) + 1)) div stridey + 1;
   colSize := _c * oh * ow * kernelWidth * kernelHeight;
+  if not assigned(dst.data) then
+    dst.resize([groups, _c, kernelHeight*kernelWidth, oh, ow], groups);
+  assert(colSize <= dst.Size(),'[im2col], Invalid destination tensor size.');
+
   _vol := volume();
   {$if not defined(FPC) and not defined(USE_OPENCL)}
   ds := dst.data;
@@ -9799,7 +10054,7 @@ var
 procedure c2i(idx:IntPtr; ptr:Pointer);
 var pmt:PBoolean absolute ptr;
 begin
-  col2imvv(c, h, w, kernelHeight, kernelWidth, padHeight, padWidth, strideY, strideX, dilationY, dilationX, src,  idx*colSize, data, idx*imSize, groups, pmt^)
+  col2imvv(_c, _h, _w, kernelHeight, kernelWidth, padHeight, padWidth, strideY, strideX, dilationY, dilationX, src.data,  idx*colSize, data, idx*imSize, groups, pmt^)
 end;
   {$else}
   da, ds: PT;
@@ -9812,14 +10067,30 @@ begin
   if benchmark then tensorMetrics.start(opCol2im);
   {$endif}
   assert(assigned(col2imvv), '[Col2Im] not implementd!');
+  if (not assigned(data)) and (src.dimensions>3) then begin
+    ow := src.w;
+    oh := src.h;
+    _w := (ow - 1) * strideX - 2*padWidth + (dilationX*(kernelWidth-1) + 1);
+    _h := (oh - 1) * strideY - 2*padHeight + (dilationX*(kernelHeight-1) + 1);
+    _c := src.n();
+    resize([src.groups, _c, _h, _w], src.groups);
+  end;
   _c := c();
   _h := h();
   _w := w();
   ow := (_w + 2 * padWidth - (dilationX * (kernelWidth - 1) + 1)) div strideX + 1;
   oh := (_h + 2 * padHeight - (dilationy * (kernelHeight - 1) + 1)) div stridey + 1;
+  //ow := src.w;
+  //oh := src.h;
+  //_w := (ow - 1) * strideX - 2*padWidth + (dilationX*(kernelWidth-1) + 1);
+  //_h := (oh - 1) * strideY - 2*padHeight + (dilationX*(kernelHeight-1) + 1);
+  //_c := src.n();
+
+
   colSize := _c * ow * oh * kernelWidth * kernelHeight;
   imSize := _c * _h * _w;
-  {$if not defined(FPC) and not defined(USE_OPENCL)}
+  assert(colSize <= src.Size(), '[col2im] Invalide source tensor size.');
+  {$if not defined(FPC) and not defined(_USE_OPENCL)}
   ds := src.data;
   da := Data;
   c2i := procedure(idx: IntPtr; ptr: Pointer)
@@ -10323,16 +10594,17 @@ end;
 
 {$endif}
 
-const
-  cblastdll = 'CLBlast.dll';
-
 var
   i: SizeInt;
-  cblastLib: THandle;
   cMode: longword;
   hConsole: THandle;
 
 initialization
+  SetPrecisionMode(TFPUPrecisionMode.pmSingle);
+  {$ifdef USE_MULTITHREADiNG}
+  mp.setWorkers(GetSystemThreadCount div TILE_M);
+  {$endif}
+
   TTensor<single>.One := 1.0;
   TTensor<double>.One := 1.0;
   TTensor<int32>.One := 1;
@@ -10489,6 +10761,8 @@ initialization
   TTensor<int64>.absdiffv                   := @vAbsDiffI;
   TTensor<byte>.absdiffv                    := @vAbsDiffI;
 
+  TTensor<single>.sumv                      := @vsSumI;
+  TTensor<double>.sumv                      := @vdSumI;
 
   {$ifdef USE_MKL}
   TTensor<Single>.addvv                     := @mkl_vml.vsAddI;
@@ -10650,36 +10924,6 @@ initialization
   TTensor<double>.im2colvv                  := @dim2Col;
   TTensor<single>.col2imvv                  := @scol2im;
   TTensor<double>.col2imvv                  := @dcol2im;
-  {$ifdef USE_OPENCL}
-  if false and FileExists(cblastdll) then begin
-    writeln('using CLBlast.dll ...');
-    cblastLib := LoadLibrary(cblastdll);
-    TTensor<Single>.gemm                      := GetProcedureAddress(cblastLib, 'cblas_sgemm');
-    TTensor<Double>.gemm                      := GetProcedureAddress(cblastLib, 'cblas_dgemm');
-    //TTensor<Single>.axpysvv         := GetProcedureAddress(cblastLib, 'cblas_saxpy');
-    //TTensor<Double>.axpysvv         := GetProcedureAddress(cblastLib, 'cblas_daxpy');
-    //TTensor<Single>.mulvs           := GetProcedureAddress(cblastLib, 'cblas_sscal');
-    //TTensor<Double>.mulvs           := GetProcedureAddress(cblastLib, 'cblas_dscal');
-  end else
-  begin
-    ocl := TOpenCL.Create(dtALL);
-    //ocl.ActivePlatformId := 0;
-    //ocl.ActiveDeviceId := 0;
-    ocl.LoadFromFile(GetCurrentDir + '/../../../../NN/source/cl_sgemm.c');
-    ocl.Build();
-    assert(ocl.isBuilt, '[OpenCL] : cannot compile tensor kernels :' + sLineBreak + ocl.BuildLog );
-    //if (ocl.BuildLog<>'') or not ocl.isBuilt then begin
-    //  writeln(ocl.BuildLog);
-    //  readln
-    //end;
-
-    //ocl.ActiveKernelId:=0;
-    //writeln('Using :', ocl.DeviceName(ocl.ActiveKernelId));
-    //writeln(ocl.ActiveKernelInfo.KernelName);
-    //for i:=0 to ocl.ActiveKernelInfo.KernelArgCount-1 do
-    //  writeln(' ', ocl.ActiveKernelInfo.KernelArgs[i].ArgType);
-  end;
-  {$endif}
 
   TTensor<single>.fmavss                    := @sfmavss;
   TTensor<double>.fmavss                    := @dfmavss;
