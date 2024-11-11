@@ -101,9 +101,9 @@ begin
   //fill_cpu(l.outputs * l.batch, 0, l.output, 1);
   output.fill(0);
   if reverse then         // todo [forward_upsample_layer] why not using rverse as a parameter instead of [if else then]
-      upsample(output, outW, outH, outC, batch, stride, false, scale, state.input)
+      upsample(output, outW, outH, outC, batch, stride, false, scale, state.input.data)
   else
-      upsample(state.input, w, h, c, batch, stride, true, scale, output);
+      upsample(state.input.data, w, h, c, batch, stride, true, scale, output);
 
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.forward.finish(layerType);
@@ -116,9 +116,9 @@ begin
   if benchmark then metrics.backward.start(layerType);
   {$endif}
   if reverse then  // todo [backward_upsample] why not passing l.reverse to the function instead of [if then else]
-      upsample(delta, outW, outH, outC, batch, stride, true, scale, state.delta)
+      upsample(delta, outW, outH, outC, batch, stride, true, scale, state.delta.data)
   else
-      upsample(state.delta, w, h, c, batch, stride, false, scale, delta) ;
+      upsample(state.delta.data, w, h, c, batch, stride, false, scale, delta) ;
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(layerType);
   {$endif}

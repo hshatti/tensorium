@@ -410,7 +410,7 @@ begin
                         if labels.data[z_index] < 0 then
                             continue;
                         setLength(z[z_index], embeddingSize);
-                        TensorUtils.get_embedding(state.input, w, h, c, embeddingSize, _w, _h, _n, b, pointer(z[z_index]))
+                        TensorUtils.get_embedding(state.input.Data, w, h, c, embeddingSize, _w, _h, _n, b, pointer(z[z_index]))
                     end;
     contrast_p_index := 0;
     step := batch * n * h * w;

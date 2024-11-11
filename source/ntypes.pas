@@ -19,6 +19,9 @@ uses
   {$elseif defined(FRAMEWORK_VCL)}
   Graphics
   {$endif}
+  {$ifdef USE_OPENCL}
+  , OpenCL
+  {$endif}
   ;
 
 const
@@ -38,13 +41,17 @@ type
   TNNetState = record
       net : TObject;
       truth : TSingleTensor;
-      input : TSingleTensor;
-      delta : TSingleTensor;
+      input : PSingleTensor;
+      delta : PSingleTensor;
       workspace : TSingleTensor;
       isTraining : boolean;
       index : SizeInt;
       label_smooth_eps : single;
       adversarial : boolean;
+      {$ifdef USE_OPENCL}
+      events: TArray<cl_event>;
+      ev    : TArray<cl_int>;
+      {$endif}
   end;
 
   PActivationType = ^TActivationType;
@@ -148,11 +155,13 @@ type
     w : SizeInt;
     h : SizeInt;
     c : SizeInt;
+    n : SizeInt;
     data : TArray<Single>;
     procedure fromTensor(const src:TSingleTensor);
     function toTensor():TSingleTensor;
-    constructor Create(const aWidth, aHeight, aChannels: SizeInt);
-    procedure loadFromFile(const fileName:string);
+    constructor Create(const aWidth, aHeight, aChannels: SizeInt; const aImageCount : SizeInt=1);
+    procedure loadFromFile(const fileName:string);                                                   overload;
+    procedure loadFromFile(const fileNames:TArray<string>; const resizeWidth, resizeHeight:SizeInt); overload;
     procedure saveToFile(const filename:string);
     procedure fill(const val:single);
     function resize(const aWidth, aHeight: SizeInt):TImageData;
@@ -468,16 +477,20 @@ begin
 end;
 
 function TImageData.toTensor(): TSingleTensor;
+var imSize : SizeInt;
 begin
-  result := TSingleTensor.Create([c, h, w]);
-  move(Data[0], result.Data[0], c*h*w*SizeOf(single));
+  imSize := h*w;
+  result := TSingleTensor.Create([n, c, h, w]);
+  move(Data[0], result.Data[0], length(data)*SizeOf(single));
 end;
 
-constructor TImageData.Create(const aWidth, aHeight, aChannels: SizeInt);
+constructor TImageData.Create(const aWidth, aHeight, aChannels: SizeInt;
+  const aImageCount: SizeInt);
 begin
   w := aWidth;
   h := aHeight;
   c := aChannels;
+  n := aImageCount;
   setLength(Data, w*h*c)
 end;
 
@@ -490,6 +503,7 @@ begin
   img := TFPMemoryImage.Create(0, 0);
   try
     img.LoadFromFile(fileName);
+    n := 1;
     c := 3;
     w := img.Width;
     h := img.Height;
@@ -512,6 +526,43 @@ begin
 
 end;
 {$endif}
+
+{$if defined(FPC)}
+procedure TImageData.loadFromFile(const fileNames: TArray<string>; const resizeWidth, resizeHeight: SizeInt);
+var img : TFPMemoryImage;
+    P:TFPColor;
+    i, x, y, imSize, _h, _w : SizeInt;
+begin
+  img := TFPMemoryImage.Create(0, 0);
+  c := 3;
+  n := length(filenames);
+  setLength(data, n*resizeHeight*resizeWidth*c);
+  try
+    for i:=0 to n-1 do begin
+      img.LoadFromFile(fileNames[i]);
+      _w := img.Width;
+      _h := img.Height;
+      w := resizeWidth;
+      h := resizeHeight;
+      imSize := resizeHeight*resizeWidth;
+      for y := 0 to resizeHeight-1 do
+        for x := 0 to resizeWidth-1 do begin
+           p := img.Colors[ round(_w * x / resizeWidth),  round(_h * y / resizeHeight)];  // nearst neighor
+           data[i*3*imSize +            y*resizeWidth + x] := p.Red / $ff00;
+           data[i*3*imSize + 1*imSize + y*resizeWidth + x] := p.Green / $ff00;
+           data[i*3*imSize + 2*imSize + y*resizeWidth + x] := p.Blue / $ff00;
+        end;
+    end;
+  finally
+    freeAndNil(img)
+  end;
+end;
+{$else}
+begin
+
+end;
+{$endif}
+
 
 procedure TImageData.saveToFile(const filename: string);
 {$if defined(fpc)}
@@ -1180,8 +1231,7 @@ begin
 
 end;
 
-procedure TDetectionsHelper.doNMSObj(const classes: SizeInt;
-  const thresh: single);
+procedure TDetectionsHelper.doNMSObj(const classes: SizeInt; const thresh: single);
 var
   i, j, k, total: SizeInt;
   swap: TDetection;
@@ -1226,8 +1276,7 @@ begin
       end
 end;
 
-procedure TDetectionsHelper.doNMSSort(const classes: SizeInt;
-  const thresh: single);
+procedure TDetectionsHelper.doNMSSort(const classes: SizeInt; const thresh: single);
 var
   i,j,k, total: SizeInt;
   swap: TDetection;

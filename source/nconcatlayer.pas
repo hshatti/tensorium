@@ -124,6 +124,9 @@ var
     //input_size: SizeInt;
     //part_input_size: SizeInt;
 begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.start(layerType);
+  {$endif}
     //offset := 0;
     //for i := 0 to l.n -1 do
     //    begin
@@ -138,6 +141,10 @@ begin
   for i:=0 to high(inTensors) do
     inTensors[i] := TNNet(state.net).layers[inputLayers[i]].delta;
   delta.addConcat(inTensors);
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
+
 end;
 
 end.

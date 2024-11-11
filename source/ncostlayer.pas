@@ -80,13 +80,13 @@ begin
         end;
     case CostType of
       ctSMOOTH :
-        smooth_l1_cpu(state.input, state.truth, delta, output);
+        smooth_l1_cpu(state.input^, state.truth, delta, output);
 
       ctL1 :
-        l1_cpu(state.input, state.truth, delta, output);
+        l1_cpu(state.input^, state.truth, delta, output);
 
     else
-        l2_cpu(state.input, state.truth, delta, output);
+        l2_cpu(state.input^, state.truth, delta, output);
 
     end;
 
@@ -125,9 +125,9 @@ var i :SizeInt;
     diff :Single;
 begin
   // todo [l2] simdfy & gpu
-  truth.CopyTo(delta.Data);
+  truth.CopyTo(delta);
   delta.Subtract(pred.Data);
-  delta.copyto(error.Data);
+  delta.copyto(error);
   error.square();
   //for i := 0 to Truth.Size()-1 do begin
   //    diff := truth.Data[i] - pred.Data[i];

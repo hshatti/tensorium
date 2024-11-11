@@ -851,7 +851,7 @@ begin
             //                cur_max := abs(delta.data[i])
             //        end;
             //cur_avg := cur_avg / counter;
-            counter := delta.countNonValue(0);
+            counter := delta.countNotValue(0);
             cur_max := delta.maxAbs();
             cur_avg := delta.sumAbs() / counter;
             if net.deltaRollingMax = 0 then
@@ -904,7 +904,7 @@ begin
                     //                    delta.data[i] := 0
                     //                end
                     //        end;
-                    counter_all := delta.countNonValue(0);
+                    counter_all := delta.countNotValue(0);
                     counter_reject:= delta.absThreshold(net.rejectThreshold, @delta.zero);
                     cur_percent := 100 * (counter_reject * num_deltas_per_anchor / counter_all);
                     if cur_percent > net.badLabelsRejectionPercentage then

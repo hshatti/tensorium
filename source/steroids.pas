@@ -134,7 +134,7 @@ type
 {$endif}
   PMPParams = ^ TMPParams;
   TMPParams = record
-     A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q:Pointer;
+     A,B,C,D,E,F,G,H,I,J,K,L,M,N,O,P,Q,R,S,T,U:Pointer;
   end;
   TMPParamsArray = array[0..$80] of TMPParams;
   {$if defined(MSWindows) or defined(linux)}
@@ -768,7 +768,6 @@ begin
     waitForPool
 end;
 
-var s:string;
 initialization
   MP:=TOPool.Create;
   MP2:=TOPool.Create;

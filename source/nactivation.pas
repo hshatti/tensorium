@@ -268,7 +268,7 @@ end;
 {$endif}
 
 
-function  stair_activate(const x:single) :single;inline;
+function stair_activate(const x:single) :single;inline;
 var n :SizeInt;
 begin
   n := floor(x);
@@ -277,7 +277,7 @@ begin
   exit((x - n) + floor(x/2));
 end;
 
-function  hardtan_activate(const x:single):single;inline;
+function hardtan_activate(const x:single):single;inline;
 begin
     if x < -1 then exit(-1);
     if x > 1 then exit(1);
@@ -504,9 +504,6 @@ var i:SizeInt;
 begin
   // todo [Activate Array] SIMDFY & GPU
 
-  {$ifdef USE_TELEMETRY} if benchmark then metrics.act.start(a);{$endif}
-
-
       case a of
           acLOGISTIC:
       {$ifdef CPUX64}
@@ -590,10 +587,10 @@ begin
 
           acSOFTMAX:
             softmax_activate(N, x);
-          else
-            assert(false, '[Activation] : not Implemented')
-          //acSWISH:
-          //           ;
+          acSWISH:
+            for i := 0 to N-1 do
+              output[i] := x[i]*logistic_activate(x[i]);
+
           //
           //acMISH:
           //           ;
@@ -608,11 +605,10 @@ begin
           //           ;
           //
           //acNORM_CHAN_SOFTMAX_MAXVAL:
-
-      //else
+          //           ;
+          else
+            assert(false, '[Activation] : not Implemented')
       end;
-
-  {$ifdef USE_TELEMETRY} if benchmark then metrics.act.finish(a);{$endif}
 end;
 
 
@@ -688,10 +684,8 @@ begin
         acGELU:
           for i := 0 to N-1 do
               delta[i] := delta[i] * gelu_gradient(x[i]);
-        else
-          assert(false, '[Derivitive] : not implemented!')
-    //    acSWISH:
-    //               ;
+        //acSWISH:
+        //           ;
     //
     //    acMISH:
     //               ;
@@ -707,7 +701,8 @@ begin
     //
     //    acNORM_CHAN_SOFTMAX_MAXVAL:
     //
-    //else
+      else
+        assert(false, '[Derivitive] : not implemented!')
     end;
 
     {$ifdef USE_TELEMETRY} if benchmark then metrics.grad.finish(a);{$endif}

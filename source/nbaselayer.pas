@@ -5,7 +5,22 @@ unit nBaseLayer;
 interface
 
 uses
-  SysUtils, ntypes, ntensors, nActivation;
+  SysUtils, ntypes, ntensors, nActivation
+  {$ifdef USE_OPENCL}
+  , OpenCL
+  {$endif}
+  ;
+
+const
+  // metrics to print :
+  TELEMETRY_OPS   = 1;      //  operations
+  TELEMETRY_ACT   = 2;      //  activations
+  TELEMETRY_FWD   = 4;      //  forward
+  TELEMETRY_GRD   = 8;      //  gradients derive
+  TELEMETRY_BWD   = 16;     //  backwards
+  TELEMETRY_UPD   = 32;     //  updates
+  TELEMETRY_ALL   = 63;     //  everything!
+
 
 type
 
@@ -64,6 +79,10 @@ type
     cost                     : TArray<Single>;
     index                    : SizeInt;
     net                      : TObject;
+    {$ifdef USE_OPENCL}
+    events                   : TArray<cl_event>;
+    ev                       : TArray<cl_int>;
+    {$endif}
     function getWorkspaceSize():SizeInt; virtual;
     procedure Activate;   inline;
     procedure Derivative; virtual;
@@ -79,6 +98,11 @@ type
     function getWorkspaceShape:TArray<SizeInt>; virtual; abstract;
     property train:boolean read FTrain write setTrain;
     property workspaceSize:SizeInt read getWorkspaceSize;
+    {$ifdef USE_OPENCL}
+    procedure forwardGPU(var state : TNNetState); virtual; abstract;
+    procedure backwardGPU(var state : TNNetState); virtual; abstract;
+    procedure updateGPU(const args : TUpdateArgs); virtual;
+    {$endif}
 
   end;
 
@@ -136,7 +160,7 @@ type
       act, grad : TAct;
       forward, backward, update:TFw;
       procedure reset;
-      function print:string;
+      function print(const telemetry:longword = TELEMETRY_ALL):string;
   end;
 {$endif}
 
@@ -158,12 +182,31 @@ end;
 
 procedure TBaseLayer.Activate;
 begin
-  activate_array(Pointer(output.Data), batch * outputs, ActivationType);
+  {$ifdef USE_TELEMETRY} if benchmark then metrics.act.start(ActivationType);{$endif}
+  {$ifdef _USE_OPENCL}
+  if output.computingDevice=cdOpenCL then begin;
+    if not output.wasGPU then
+      output.pushToDevice;
+    ocl.ActivateArray(output.devData, batch * outputs, longint(ActivationType));
+  end else
+  {$endif}
+    activate_array(Pointer(output.Data), batch * outputs, ActivationType);
+  {$ifdef USE_TELEMETRY} if benchmark then metrics.act.finish(ActivationType);{$endif}
 end;
 
 procedure TBaseLayer.Derivative;
 begin
-  gradient_array(pointer(output.Data), batch * outputs, ActivationType, pointer(Delta.Data));
+  {$if defined(_USE_OPENCL)}
+  if output.computingDevice = cdOpenCL then begin
+    if not output.wasGPU then
+      output.pushToDevice;
+    if not delta.wasGPU() then
+      delta.pushToDevice;
+    ocl.DeriveArray(output.devData, batch * outputs, longint(ActivationType), delta.devData);
+    //ocl.finish;
+  end else
+  {$endif}
+    gradient_array(pointer(output.Data), batch * outputs, ActivationType, pointer(Delta.Data));
 end;
 
 function TBaseLayer.LayerName: string;
@@ -258,6 +301,13 @@ begin
 
 end;
 
+{$ifdef USE_OPENCL}
+procedure TBaseLayer.updateGPU(const args: TUpdateArgs);
+begin
+ //
+end;
+{$endif}
+
 { TBaseImageLayer }
 
 procedure TBaseImageLayer.batchNorm(var state: TNNetState);
@@ -267,7 +317,7 @@ begin
 {$endif}
 
   if LayerType = ltBATCHNORM then
-      state.input.copyTo(output.data);
+      state.input.copyTo(output);
 
   //if l.&type = ltCONNECTED then begin
   //    outC := outputs;
@@ -281,9 +331,9 @@ begin
       rolling_mean.axpy(0.1, mean);
       rolling_variance.Multiply(0.9);
       rolling_variance.axpy(0.1, variance);
-      output.CopyTo(x.Data);
+      output.CopyTo(x);
       output.Normalize(mean, variance);
-      output.copyTo(x_norm.Data)
+      output.copyTo(x_norm)
   end else
       output.Normalize(rolling_mean, rolling_variance);
 
@@ -309,7 +359,7 @@ begin
   delta.MeansAndVarsDelta(delta, x, mean, variance, mean_delta, variance_delta);
   delta.normalizeDelta(x, mean, variance, mean_delta, variance_delta, delta);
   if layerType = ltBATCHNORM then
-    delta.copyTo(state.delta.Data);
+    delta.copyTo(state.delta^);
 
 {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(ltBATCHNORM);
@@ -340,42 +390,80 @@ end;
 procedure TMetrics.reset;
 begin
   if assigned(ops) then
-    fillchar(PAnsiChar(@ops.all)[0], sizeOf(ops.all), #0);
+    fillchar(PAnsiChar(@ops.elapsed)[0], sizeOf(ops.elapsed), #0);
+  if assigned(ops) then
+    fillchar(PAnsiChar(@ops.counts)[0], sizeOf(ops.counts), #0);
   fillchar(PAnsiChar(@act.all)[0], sizeOf(act.all), #0);
   fillchar(PAnsiChar(@grad.all)[0], sizeOf(grad.all), #0);
   fillchar(PAnsiChar(@forward.all)[0], sizeOf(forward.all), #0);
   fillchar(PAnsiChar(@backward.all)[0], sizeOf(backward.all), #0);
+  fillchar(PAnsiChar(@update.all)[0], sizeOf(backward.all), #0);
 
 end;
 
-function TMetrics.print: string;
+function TMetrics.print(const telemetry: longword): string;
 const uSecPerSec=1000000;
 var
   i :TMeasureOps;
   j :TActivationType;
   k :TLayerType;
 begin
-  result := '';
   if not benchmark then exit;
-  result:=sLineBreak;
-  for i:= low(ops.all) to high(ops.all) do
-    if ops.all[i]<>0 then
-      result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TMeasureOps),ord(i)),3), ops.all[i]/uSecPerSec] ) + sLineBreak;
-  result := result + '----------------------------' + sLineBreak;
-  result := result + format('Total          %10.3f[ms]', [ops.total()/uSecPerSec]) + sLineBreak + sLineBreak;
+  result :='';
 
-  for j:= low(act.all) to high(act.all) do
-    if act.all[j]<>0 then
-      result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TActivationType),ord(j)),3), act.all[j]/uSecPerSec] ) + sLineBreak;
-  result := result + '----------------------------' + sLineBreak;
-  result := result + format('Total          %10.3f[ms]', [act.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  if (telemetry and TELEMETRY_OPS>0) and (ops.total<>0) then begin
+    result := result + 'Operations :'+ sLineBreak;
+    for i:= low(ops.elapsed) to high(ops.elapsed) do
+      if ops.elapsed[i]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TMeasureOps),ord(i)),3), ops.elapsed[i]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [ops.total()/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
 
-  for k:= low(forward.all) to high(forward.all) do
-    if forward.all[k]<>0 then
-      result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TLayerType),ord(k)),3), forward.all[k]/uSecPerSec] ) + sLineBreak;
-  result := result + '----------------------------' + sLineBreak;
-  result := result + format('Total          %10.3f[ms]', [forward.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  if (telemetry and TELEMETRY_ACT>0) and (act.total<>0) then begin
+    result := result + sLineBreak + 'Activations :' + sLineBreak;
+    for j:= low(act.all) to high(act.all) do
+      if act.all[j]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TActivationType),ord(j)),3), act.all[j]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [act.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
 
+  if (telemetry and TELEMETRY_FWD>0) and (forward.total<>0) then begin
+    result := result + sLineBreak + 'Forwards :' + sLineBreak;
+    for k:= low(forward.all) to high(forward.all) do
+      if forward.all[k]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TLayerType),ord(k)),3), forward.all[k]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [forward.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
+
+  if (telemetry and TELEMETRY_GRD>0) and (grad.total<>0) then begin
+    result := result + sLineBreak + 'Gradients:' + sLineBreak;
+    for j:= low(grad.all) to high(grad.all) do
+      if grad.all[j]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TActivationType),ord(j)),3), grad.all[j]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [grad.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
+
+  if (telemetry and TELEMETRY_BWD>0) and (backward.total<>0) then begin
+    result := result + sLineBreak + 'Backwards :' + sLineBreak;
+    for k:= low(backward.all) to high(backward.all) do
+      if backward.all[k]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TLayerType),ord(k)),3), backward.all[k]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [backward.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
+
+  if (telemetry and TELEMETRY_UPD>0) and (update.total<>0) then begin
+    result := result + sLineBreak + 'Updats :' + sLineBreak;
+    for k:= low(update.all) to high(update.all) do
+      if update.all[k]<>0 then
+        result := result + format('%-15s%10.3f[ms]',[copy(GetEnumName(TypeInfo(TLayerType),ord(k)),3), update.all[k]/uSecPerSec] ) + sLineBreak;
+    result := result + '----------------------------' + sLineBreak;
+    result := result + format('Total          %10.3f[ms]', [update.total/uSecPerSec]) + sLineBreak + sLineBreak;
+  end;
 end;
 
 { TMetrics.TAct }

@@ -2,11 +2,14 @@ unit nConvolutionLayer;
 {$ifdef FPC}
 {$mode Delphi}
 {$endif}
-
+{$PointerMath on}
 interface
 
 uses
-  SysUtils, nTensors, nTypes, nBaseLayer, nCol2Im, nActivation
+  SysUtils, nTensors, nTypes, nBaseLayer, nActivation
+  {$ifdef USE_OPENCL}
+    {$ifdef CL_BLAST} , clblast {$endif}
+  {$endif}
   {$ifdef MSWINDOWS)} , shellApi{$endif}
   ;
 
@@ -34,6 +37,8 @@ type
 
   { TConvolutionLayer }
 
+  { TConvolutionalLayer }
+
   TConvolutionalLayer=class(TBaseConvolutionalLayer)
   protected
     procedure setTrain(ATrain: boolean); override;
@@ -59,7 +64,13 @@ type
     procedure forward(var state: TNNetState); override;
     procedure backward(var state: TNNetState); override;
     procedure update(const args: TUpdateArgs); override;
+    {$ifdef USE_OPENCL}
+    procedure forwardGPU(var state: TNNetState);  override;
+    procedure backwardGPU(var state: TNNetState); override;
+    procedure updateGPU(const args: TUpdateArgs); override;
+    {$endif}
   end;
+
 
 implementation
 uses math, nnet;
@@ -478,32 +489,50 @@ begin
     //        TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasNoTrans, m, outImgSize, k, 1, _A, k, _B, outImgSize, 1, _C, outImgSize);
     //    end;
 
-    // todo [TConvolutionLayer] implement multi GPU grouos
+    // todo [TConvolutionLayer] implement multi GPU groups
+
+    //if not state.input.wasGPU() then
+    //  state.input.pushToDevice;
+    //if train or not weights.wasGPU() then
+    //    weights.pushToDevice;
 
     state.input.Conv2D(weights, output, Padding, Padding, stride_x, stride_y, Dilation, Dilation);
-
+    //output.SaveToImage( 'tmp'+intToStr(index)+'.bmp');
+    //shellApi.ShellExecute(0, 'open', 'tmp'+intToStr(index)+'.bmp', '', '', 0);
+    //readln;
     //state.input.conv2d(weights, output, Padding, padding, stride_x, stride_y, Dilation, Dilation) ;
+
+
+    //if not biases.wasGPU then
+    //    biases.pushToDevice;
+
     if isBatchNormalized then
       batchNorm(state)
     else
       output.Add(biases);
 
+    //output.pullFromDevice;
+    //if output.wasGPU then output.pullFromDevice;
+    //if biases.wasGPU then biases.pullFromDevice;
+
     case ActivationType of
        acSWISH :
-          activate_array_swish(output, outputs * batch, ActivationInput, output);
+          activate_array_swish(output, outputs * batch, activationInput, output);
        acMISH :
           activate_array_mish(output, outputs * batch, activationInput, output);
        acHARD_MISH :
-            activate_array_hard_mish(output, outputs * batch, ActivationInput, output);
+          activate_array_hard_mish(output, outputs * batch, ActivationInput, output);
        acNORM_CHAN :
-            activate_array_normalize_channels(output, outputs * batch, batch, outC, outW * outH, output);
+          activate_array_normalize_channels(output, outputs * batch, batch, outC, outW * outH, output);
        acNORM_CHAN_SOFTMAX, acNORM_CHAN_SOFTMAX_MAXVAL :
-            activate_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outH, output, activationType = acNORM_CHAN_SOFTMAX_MAXVAL);
+          activate_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outH, output, activationType = acNORM_CHAN_SOFTMAX_MAXVAL);
        else begin
            //output.print(true, 3);
-           activate()
+          activate()
        end;
     end;
+
+
     if (assistedExcitation<>0) and state.isTraining then
         assistedForward(state);
     if antialiasing<>0 then
@@ -512,13 +541,12 @@ begin
             s.isTraining := state.isTraining;
             s.workspace := state.workspace;
             //s.net := state.net;
-            s.input := output;
+            s.input := @output;
             //forward_convolutional_layer( l.input_layer[0], @s);
             inputLayer.forward(s);
             //move(l.input_layer[0].output[0], l.output[0], l.input_layer[0].outputs * l.input_layer[0].batch * sizeof(single))
-            inputLayer.output.copyTo(output.Data);
+            inputLayer.output.copyTo(output);
         end;
-
     {$ifdef USE_TELEMETRY}
     if benchmark then metrics.forward.finish(layerType);
     {$endif}
@@ -527,81 +555,94 @@ end;
 
 procedure TConvolutionalLayer.backward(var state: TNNetState);
 var
-    i,j, m, n, k, nweights, colSize: SizeInt;
-    _A, _B, _C, im: Pointer;
+    //nweights,
+      i,j, m, n, k, colSize: SizeInt;
+    _A, _B, _C, im: Pointer; tmp:TSingleTensor;
 begin
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.start(layerType);
   {$endif}
-      m := filters div groups;
-      n := kernelSize * kernelSize * c div groups;
-      k := outW * outW;
+  m := filters div groups;
+  n := kernelSize * kernelSize * c div groups;
+  k := outH * outW;
 
-      colSize := getWorkspaceSize div batch;
+  colSize := getWorkspaceSize div batch;
+  case activationType of
+    acSWISH :
+      gradient_array_swish(output, outputs * batch, activationInput, delta) ;
+    acMISH  :
+      gradient_array_mish(outputs * batch, activationInput, delta) ;
+    acHARD_MISH :
+      gradient_array_hard_mish(outputs * batch, activationInput, delta) ;
+    acNORM_CHAN_SOFTMAX, acNORM_CHAN_SOFTMAX_MAXVAL :
+      gradient_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outW, delta) ;
+    acNORM_CHAN :
+      gradient_array_normalize_channels(output, outputs * batch, batch, outC, outW * outW, delta) ;
+    else
+      Derivative();
+  end;
+  if isBatchNormalized then
+      batchNormBack(state)
+  else
+      bias_updates.Add(delta);
+  //nweights := weights.size();
+  //for i := 0 to batch -1 do
+  //    for j := 0 to groups -1 do
+  //        begin
+  //            _A := delta.Data+(i * groups+j) * m * k;
+  //            _B := pointer(state.workspace.data);
+  //            _C := weight_updates.data  + j * nweights div groups;
+  //            im := state.input.data +(i * groups+j) * (c div groups) * h * w;
+  //            im2col_cpu_ext(im, c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, _B);
+  //            TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, _A, k, _B, k, 1, _C, n);
+  //            if assigned(state.delta.Data) then
+  //                begin
+  //                    _A := weights.Data+j * nweights div groups;
+  //                    _B := delta.Data + (i * groups+j) * m * k;
+  //                    _C := pointer(state.workspace.data);
+  //                    TSingleTensor.gemm(CblasRowMajor, CblasTrans, CblasNoTrans, n, k, m, 1, _A, n, _B, k, 0, _C, k);
+  //                    col2im_cpu_ext(pointer(state.workspace.data), c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, pointer(state.delta.data +(i * groups+j) * (c div groups) * h * w))
+  //                end
+  //        end ;
 
-      case activationType of
-        acSWISH :
-          gradient_array_swish(output, outputs * batch, activationInput, delta) ;
-        acMISH  :
-          gradient_array_mish(outputs * batch, activationInput, delta) ;
-        acHARD_MISH :
-          gradient_array_hard_mish(outputs * batch, activationInput, delta) ;
-        acNORM_CHAN_SOFTMAX, acNORM_CHAN_SOFTMAX_MAXVAL :
-          gradient_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outW, delta) ;
-        acNORM_CHAN :
-          gradient_array_normalize_channels(output, outputs * batch, batch, outC, outW * outW, delta) ;
-        else
-          Derivative();
-      end;
-      if isBatchNormalized then
-          batchNormBack(state)
-      else
-          bias_updates.Add(delta);
+  //for i:= 0 to batch -1 do begin
+  //  _A := delta.Data+i * m * k;
+  //  _B := pointer(state.workspace.data + i*imcolSize);
+  //  _C := weight_updates.data ;
+  //  im := state.input.data + c * h * w;
+  //  im2col_cpu_ext(im, c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, _B);
+  //  TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, _A, k, _B, k, 1, _C, n);
+  //end;
 
-      nweights := weights.size();
-      //for i := 0 to batch -1 do
-      //    for j := 0 to groups -1 do
-      //        begin
-      //            _A := delta.Data+(i * groups+j) * m * k;
-      //            _B := pointer(state.workspace.data);
-      //            _C := weight_updates.data  + j * nweights div groups;
-      //            im := state.input.data +(i * groups+j) * (c div groups) * h * w;
-      //            im2col_cpu_ext(im, c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, _B);
-      //            TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, _A, k, _B, k, 1, _C, n);
-      //            if assigned(state.delta.Data) then
-      //                begin
-      //                    _A := weights.Data+j * nweights div groups;
-      //                    _B := delta.Data + (i * groups+j) * m * k;
-      //                    _C := pointer(state.workspace.data);
-      //                    TSingleTensor.gemm(CblasRowMajor, CblasTrans, CblasNoTrans, n, k, m, 1, _A, n, _B, k, 0, _C, k);
-      //                    col2im_cpu_ext(pointer(state.workspace.data), c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, pointer(state.delta.data +(i * groups+j) * (c div groups) * h * w))
-      //                end
-      //        end ;
+  state.input.im2Col(kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, state.workspace, 1);
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+  {$endif}
+  for i:= 0 to batch -1 do
+    TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1
+    , delta.data + i*m*k, k
+    , state.workspace.data + i*ColSize, k
+    , 1, weight_updates.data, n);
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+  {$endif}
 
-      //for i:= 0 to batch -1 do begin
-      //  _A := delta.Data+i * m * k;
-      //  _B := pointer(state.workspace.data + i*imcolSize);
-      //  _C := weight_updates.data ;
-      //  im := state.input.data + c * h * w;
-      //  im2col_cpu_ext(im, c div groups, h, w, kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, _B);
-      //  TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, _A, k, _B, k, 1, _C, n);
-      //end;
-
-      state.input.im2Col(kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, state.workspace.data);
-
-      for i:= 0 to batch -1 do
-        TSingleTensor.gemm(CblasRowMajor, CblasNoTrans, CblasTrans, m, n, k, 1, delta.data + i*m*k, k, state.workspace.data + i*ColSize, k, 1, weight_updates.data, n);
-
-      if assigned(state.delta.data) then begin
-        for i := 0 to batch -1 do begin
-            _A := weights.Data;
-            _B := delta.Data + i * m * k;
-            _C := pointer(state.workspace.data + i*colSize);
-            TSingleTensor.gemm(CblasRowMajor, CblasTrans, CblasNoTrans, n, k, m, 1, _A, n, _B, k, 0, _C, k);
-        end;
-
-        state.delta.col2Im(kernelSize, kernelSize, padding*Dilation, padding*Dilation, stride_x, stride_y, dilation, dilation, state.workspace.data);
-      end;
+  if assigned(state.delta) and assigned(state.delta.data) then begin
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+  {$endif}
+    for i := 0 to batch -1 do begin
+        TSingleTensor.gemm(
+          CblasRowMajor, CblasTrans, CblasNoTrans, n, k, m, 1
+          , weights.Data, n
+          , delta.Data + i * m * k, k
+          , 0, state.workspace.data + i*colSize, k);
+    end;
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+  {$endif}
+    state.delta.col2Im(kernelSize, kernelSize, padding*Dilation, padding*Dilation, stride_x, stride_y, dilation, dilation, state.workspace);
+  end;
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.backward.finish(layerType);
   {$endif}
@@ -615,36 +656,494 @@ begin
   if benchmark then metrics.update.start(layerType);
   {$endif}
 
-    learning_rate := args.learningRate * learningRateScale;
-    //axpy_cpu(l.nweights, -args.decay * args.batch, l.weights, 1, l.weight_updates, 1);
-    weight_updates.axpy(-args.decay * args.batch, weights);
+  learning_rate := args.learningRate * learningRateScale;
+  //axpy_cpu(l.nweights, -args.decay * args.batch, l.weights, 1, l.weight_updates, 1);
+  weight_updates.axpy(-args.decay * args.batch, weights);
 
-    //axpy_cpu(l.nweights, learning_rate / args.batch, l.weight_updates, 1, l.weights, 1);
-    weights.axpy(learning_rate / args.batch, weight_updates);
+  //axpy_cpu(l.nweights, learning_rate / args.batch, l.weight_updates, 1, l.weights, 1);
+  weights.axpy(learning_rate / args.batch, weight_updates);
 
-    //scal_cpu(l.nweights, args.momentum, l.weight_updates, 1);
-    weight_updates.Multiply(args.momentum);
+  //scal_cpu(l.nweights, args.momentum, l.weight_updates, 1);
+  weight_updates.Multiply(args.momentum);
 
-    //axpy_cpu(l.n, learning_rate / args.batch, l.bias_updates, 1, l.biases, 1);
-    biases.axpy(learning_rate / args.batch, bias_updates);
+  //axpy_cpu(l.n, learning_rate / args.batch, l.bias_updates, 1, l.biases, 1);
+  biases.axpy(learning_rate / args.batch, bias_updates);
 
-    //scal_cpu(l.n, args.momentum, l.bias_updates, 1);
-    bias_updates.multiply(args.momentum);
+  //scal_cpu(l.n, args.momentum, l.bias_updates, 1);
+  bias_updates.multiply(args.momentum);
 
-    if assigned(scales.Data) then
-        begin
-            //axpy_cpu(l.n, learning_rate / args.batch, l.scale_updates, 1, l.scales, 1);
-            scales.axpy(learning_rate / args.batch, scale_updates);
+  if assigned(scales.Data) then
+      begin
+          //axpy_cpu(l.n, learning_rate / args.batch, l.scale_updates, 1, l.scales, 1);
+          scales.axpy(learning_rate / args.batch, scale_updates);
 
-            //scal_cpu(l.n, args.momentum, l.scale_updates, 1)
-            scale_updates.multiply(args.momentum);
-        end;
-    inherited update(args);
+          //scal_cpu(l.n, args.momentum, l.scale_updates, 1)
+          scale_updates.multiply(args.momentum);
+      end;
+  inherited update(args);
 
   {$ifdef USE_TELEMETRY}
   if benchmark then metrics.update.finish(layerType);
   {$endif}
 end;
+
+{$ifdef USE_OPENCL}
+procedure TConvolutionalLayer.forwardGPU(var state: TNNetState);
+var
+    b, aOffset, bOffset , outImgSize, kSize, k, imColSize, o:SizeInt;
+    _A, _B, _C : pointer;
+    s : TNNetState;
+    t : TSingleTensor;
+begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.start(layerType);
+  {$endif}
+
+  if not state.input.wasGPU() then state.input.pushToDevice;
+  if not weights.wasGPU() then weights.pushToDevice;
+  if not biases.wasGPU() then biases.pushToDevice;
+  output.setOCL;
+
+  kSize := kernelSize*kernelSize;
+  outImgSize := output.area();
+  //filters := weights.c();
+  k := c * kSize;
+  imColSize := c * kSize * outImgSize;
+
+
+  {$ifdef CLBLASTCONV}
+  //if not wasGPU() then
+  //  pushToDevice;
+// todo remove comment below when tensor GPU ops is complete
+  //if not weights.wasGPU() then
+    //AKernels.pushToDevice;
+  {$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.start(opConv2D);
+  {$endif}
+  ocl.FErr := integer(CLBlastSconvgemm(CLBlastKernelModeCrossCorrelation, c, h, w, kernelSize, kernelSize, Padding, Padding
+           , Stride_y, Stride_x, Dilation, Dilation, filters, batch
+           , state.input.devData, 0, weights.devData, 0, output.devData, 0, @ocl.ActiveQueue
+           {$IFDEF CL_EVENTS}
+           , @state.events[b]));
+           {$ELSE}
+           , nil));
+           {$ENDIF}
+  ocl.CheckError();
+  {$ifdef USE_TELEMETRY}
+  if benchmark then tensorMetrics.finish(opConv2D);
+  {$endif}
+  dst.setOCL;
+  {$else}
+  //setLength(ev, length(events));
+  for b := 0 to batch - 1 do
+  begin
+    {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opIm2col);
+    {$endif}
+    bOffset := 0;
+    if (kSize <> 1) or (Stride_y * Stride_x <> 1) or (Dilation * Dilation <> 1) then
+      begin
+        _A := state.input.devData;
+        _B := state.workspace.devData;
+        aOffset := b * state.input.volume();
+        bOffset := b * imColSize;
+        {$IFDEF CL_BLAST}
+        ocl.FErr := integer(CLBlastSim2col(CLBlastKernelModeCrossCorrelation, c, h, w, kernelSize, kernelSize, Padding, Padding, stride_y, stride_x, Dilation, Dilation, _A, aOffset, _B, bOffset, @ocl.ActiveQueue
+          {$IFDEF CL_EVENTS}
+          , @state.events[b]));
+          {$ELSE}
+          , nil));
+          {$ENDIF}
+        ocl.CheckError();
+        {$ELSE}
+        ocl.im2col(c, h, w, kernelSize, kernelSize, Padding, Padding, stride_y, stride_x, Dilation, Dilation, _A, aOffset, _B, bOffset
+          {$IFDEF CL_EVENTS}
+          , 1, @state.events[b], @state.events[b]);
+          {$ELSE}
+          , 0, nil, nil);
+          {$ENDIF}
+        {$ENDIF}
+        //ocl.waitForEvents(1, @events[b]);
+      end
+    else
+      begin
+        _B := state.input.devData;
+        bOffset := b * state.input.volume();
+      end;
+    {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opIm2col);
+    {$endif}
+
+    {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+    {$endif}
+    _C := output.devData;
+{$IFDEF CL_BLAST}
+    ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeNo, filters, outImgSize, k, 1, weights.devData, 0, k, _B, bOffset, outImgSize, 0, _C, b * outImgSize * filters, outImgSize, @ocl.ActiveQueue
+    {$IFDEF CL_EVENTS}
+    , @events[b]));
+    {$ELSE}
+    , nil));
+    {$ENDIF}
+    ocl.CheckError();
+{$ELSE}
+    ocl.gemm(false, false, filters, outImgSize, k, 1, weights.devData, 0, k, _B, bOffset, outImgSize, 0, _C, b * outImgSize * filters, outImgSize
+    {$IFDEF CL_EVENTS}
+    , 1, @state.events[b], @state.events[b]);
+    {$ELSE}
+    , 0, nil, nil);
+    {$ENDIF}
+{$ENDIF}
+    //ocl.waitForEvents(1, @events[b]);
+    {$ifdef USE_TELEMETRY}
+      if benchmark then tensorMetrics.finish(opGemm);
+    {$endif}
+  end;
+  //ocl.finish();
+  {$endif CLBLASTCONV}
+
+  //state.input.Conv2D(weights, output, Padding, Padding, stride_x, stride_y, Dilation, Dilation);
+  //for b:=0 to high(events) do
+  //  clGetEventInfo(events[b], CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), @ev[b], o);
+
+  if isBatchNormalized then
+    batchNorm(state)
+  else
+    ocl.forwardBias(biases.Size(), output.devData, output.size() div (batch * biases.Size()), biases.devData,1, Batch
+    {$IFDEF CL_EVENTS}
+    , batch, pointer(state.events), pointer(state.events));
+    {$ELSE}
+    , 0, nil, nil);
+    {$ENDIF}
+    //for b:=0 to high(events) do
+    //  clGetEventInfo(events[b], CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof(cl_int), @ev[b], o);
+
+  //ocl.finish();
+  case ActivationType of
+     acSWISH :
+       ocl.activateArraySWISH(output.devData, outputs * batch, ActivationInput.devData, output.devData
+       {$IFDEF CL_EVENTS}
+       , 1, pointer(state.events), pointer(state.events));
+       {$ELSE}
+       , 0, nil, nil);
+       {$ENDIF}
+     //acMISH :
+     //   activate_array_mish(output, outputs * batch, activationInput, output);
+     //acHARD_MISH :
+     //     activate_array_hard_mish(output, outputs * batch, ActivationInput, output);
+     //acNORM_CHAN :
+     //     activate_array_normalize_channels(output, outputs * batch, batch, outC, outW * outH, output);
+     //acNORM_CHAN_SOFTMAX, acNORM_CHAN_SOFTMAX_MAXVAL :
+     //     activate_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outH, output, activationType = acNORM_CHAN_SOFTMAX_MAXVAL);
+     else
+       ocl.ActivateArray(output.devData, output.Size(), longint(ActivationType)
+       {$IFDEF CL_EVENTS}
+       , 1, pointer(state.events), pointer(state.events));
+       {$ELSE}
+       , 0, nil, nil);
+       {$ENDIF}
+  end;
+  //activate;
+  //
+  //output.pullFromDevice(t);
+  //writeln(state.index, ' CONV FW: ');
+  //t.printStat();
+  //output.printStat();
+  //writeln(' sumSQRDiff : ', t.sumSqrDiff(output):1:6);
+  //readln;
+
+  if (assistedExcitation<>0) and state.isTraining then
+      assistedForward(state);
+  if antialiasing<>0 then begin
+      s := default(TNNetState);
+      s.isTraining := state.isTraining;
+      s.workspace := state.workspace;
+      s.input := @output;
+      inputLayer.forward(s);
+      inputLayer.output.copyTo(output);
+  end;
+  //ocl.finish();
+
+  //ocl.waitForEvents(1, pointer(events));
+
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.forward.finish(layerType);
+  {$endif}
+end;
+
+procedure TConvolutionalLayer.backwardGPU(var state: TNNetState);
+var
+    b, m, n, k, colSize, _vol, imSize: SizeInt;
+    t:TSingleTensor;
+begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.start(layerType);
+  {$endif}
+  m := filters div groups;
+  n := kernelSize * kernelSize * c div groups;
+  k := outH * outW;
+
+  colSize := c * outH * outW * kernelSize * kernelSize;
+  //colSize := getWorkspaceSize div batch;
+  _vol := state.input.Volume();
+  if not delta.wasGPU() then delta.pushToDevice;
+  if not bias_updates.wasGPU() then bias_updates.pushToDevice;
+  if not state.input.wasGPU() then state.input.pushToDevice;
+
+  case activationType of
+    acSWISH :
+      gradient_array_swish(output, outputs * batch, activationInput, delta) ;
+    //acMISH  :
+    //  gradient_array_mish(outputs * batch, activationInput, delta) ;
+    //acHARD_MISH :
+    //  gradient_array_hard_mish(outputs * batch, activationInput, delta) ;
+    //acNORM_CHAN_SOFTMAX, acNORM_CHAN_SOFTMAX_MAXVAL :
+    //  gradient_array_normalize_channels_softmax(output, outputs * batch, batch, outC, outW * outW, delta) ;
+    //acNORM_CHAN :
+    //  gradient_array_normalize_channels(output, outputs * batch, batch, outC, outW * outW, delta) ;
+    else
+      ocl.DeriveArray(output.devData, output.Size(), longint(ActivationType), delta.devData
+      {$IFDEF CL_EVENTS}
+      , batch, pointer(state.events), pointer(state.events));
+      {$ELSE}
+      , 0, nil, nil);
+      {$ENDIF}
+  end;
+  //ocl.waitForEvents(1, pointer(events));
+  //ocl.finish();
+  if isBatchNormalized then
+    batchNormBack(state)
+  else
+    ocl.backwardBias(bias_updates.size(), bias_updates.devData, delta.size div (batch*bias_updates.size()), delta.devData, 1, batch
+    {$IFDEF CL_EVENTS}
+    , 1, pointer(state.events), pointer(state.events));
+    {$ELSE}
+    , 0, nil, nil);
+    {$ENDIF}
+
+  //ocl.waitForEvents(1, pointer(events));
+  //ocl.finish();
+  state.workspace.setOCL;
+
+  for b:=0 to batch-1 do begin
+    {$IFDEF CL_BLAST}
+    ocl.FErr := longint(CLBlastSim2col(CLBlastKernelModeCrossCorrelation, c, h, w, kernelSize, kernelSize, Padding, Padding,
+      stride_y, stride_x, dilation, dilation, state.input.devData , b*_vol, state.workspace.devData, b*colSize, @ocl.ActiveQueue
+      {$IFDEF CL_EVENTS}
+      , @state.events[b]));
+      {$ELSE}
+      , nil));
+      {$ENDIF}
+    ocl.CheckError;
+    {$ELSE}
+    ocl.im2col(c, h, w, kernelSize, kernelSize, Padding, Padding,
+      stride_y, stride_x, dilation, dilation, state.input.devData , b*_vol, state.workspace.devData, b*colSize
+      {$IFDEF CL_EVENTS}
+      , 1, @state.events[b], @state.events[b]);
+      {$ELSE}
+      , 0, nil, nil);
+      {$ENDIF}
+    {$ENDIF}
+    //ocl.waitForEvents(1, @events[b]);
+    //ocl.finish();
+  end;
+  //state.input.im2Col(kernelSize, kernelSize, padding * dilation, padding * dilation, stride_y, stride_x, dilation, dilation, state.workspace, 1);
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+  if not weight_updates.wasGPU() then weight_updates.pushToDevice;
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+  {$endif}
+  for b:= 0 to batch -1 do begin
+{$IFDEF CL_BLAST}
+    ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeNo, CLBlastTransposeYes,
+         m, n, k, 1
+         , delta.devData , b*m*k, k
+         , state.workspace.devData, b*ColSize, k
+         , 1, weight_updates.devData, 0, n, @ocl.ActiveQueue
+    {$IFDEF CL_EVENTS}
+         , @events[b]));
+    {$ELSE}
+         , nil));
+    {$ENDIF}
+    ocl.CheckError();
+{$ELSE}
+    ocl.gemm(false, true,
+            m, n, k, 1
+            , delta.devData , b*m*k, k
+            , state.workspace.devData, b*ColSize, k
+            , 1, weight_updates.devData, 0, n
+            {$IFDEF CL_EVENTS}
+            , 1,  @state.events[b],  @state.events[b]);
+            {$ELSE}
+            , 0, nil, nil);
+            {$ENDIF}
+{$ENDIF}
+    //ocl.waitForEvents(1, @events[b]);
+    //ocl.finish();
+  end;
+  {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+  {$endif}
+
+  if assigned(state.delta) and assigned(state.delta.devdata) then begin
+    if not weights.wasGPU() then weights.pushToDevice;
+    //if not state.delta.wasGPU then state.delta.pushToDevice;
+    {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.start(opGemm);
+    {$endif}
+    for b := 0 to batch -1 do begin
+{$IFDEF CL_BLAST}
+        ocl.FErr := integer(CLBlastSgemm(CLBlastLayoutRowMajor, CLBlastTransposeYes, CLBlastTransposeNo,
+           n, k, m, 1,
+           weights.devData, 0    , n,
+           delta.devData  , b*m*k, k,
+           0, state.workspace.devData, b*colSize, k, @ocl.ActiveQueue
+        {$IFDEF CL_EVENTS}
+           , @events[b]));
+        {$ELSE}
+           , nil));
+        {$ENDIF}
+        ocl.CheckError;
+{$ELSE}
+        ocl.gemm(true, false,
+          n, k, m, 1,
+          weights.devData, 0    , n,
+          delta.devData  , b*m*k, k,
+          0, state.workspace.devData, b*colSize, k
+          {$IFDEF CL_EVENTS}
+          , 1,  @state.events[b],  @state.events[b])
+          {$ELSE}
+          , 0, nil, nil);
+          {$ENDIF}
+{$ENDIF}
+        //ocl.waitForEvents(1, events[b]);
+      //ocl.finish();
+    end;
+    {$ifdef USE_TELEMETRY}
+    if benchmark then tensorMetrics.finish(opGemm);
+    {$endif}
+    imSize := state.delta.Volume();
+    for b := 0 to batch-1 do begin
+      {$IFDEF CL_BLAST}
+      ocl.FErr := longint(CLBlastScol2im(CLBlastKernelModeCrossCorrelation, state.delta.c, state.delta.h, state.delta.w, kernelSize, kernelSize, Padding, Padding
+              , stride_y, stride_x, dilation, dilation, state.workspace.devData, b*colSize, state.delta.devData, b*imSize, @ocl.ActiveQueue
+              {$IFDEF CL_EVENTS}
+              , @state.events[b]));
+              {$ELSE}
+              , nil));
+              {$ENDIF}
+      ocl.CheckError;
+      {$ELSE}
+      ocl.col2im(state.delta.c, state.delta.h, state.delta.w, kernelSize, kernelSize, Padding, Padding
+              , stride_y, stride_x, dilation, dilation, state.workspace.devData, b*colSize, state.delta.devData, b*imSize
+              {$IFDEF CL_EVENTS}
+              , 1, @state.events[b], @state.events[b]);
+              {$ELSE}
+              , 0, nil, nil);
+              {$ENDIF}
+      {$ENDIF}
+      //ocl.waitForEvents(1, events[b]);
+      //ocl.finish();
+    end;
+    //state.delta.col2Im(kernelSize, kernelSize, padding*Dilation, padding*Dilation, stride_x, stride_y, dilation, dilation, state.workspace, 1);
+
+  end ;
+
+  //backward(state);
+  //writeln(slinebreak, state.index,' CONV delta :');
+  //delta.pullFromDevice(t);
+  //delta.printStat(); t.printStat();
+  //writeln(' diff : ', t.sumSqrDiff(delta):1:6);
+  //t.free;
+  //if assigned(state.delta) and assigned(state.delta.Data) then begin
+  //  writeln(slinebreak,state.index,' CONV state.delta :');
+  //  state.delta.pullFromDevice(t);
+  //  state.delta.printStat(); t.printStat();
+  //  writeln(' diff : ', t.sumSqrDiff(state.delta^):1:6);
+  //end;
+  //readln;
+  //ocl.waitForEvents(batch, pointer(events));
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.backward.finish(layerType);
+  {$endif}
+end;
+
+procedure TConvolutionalLayer.updateGPU(const args: TUpdateArgs);
+var
+    learning_rate: single;
+begin
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.update.start(layerType);
+  {$endif}
+
+  if not biases.wasGPU() then biases.pushToDevice;
+  if not bias_updates.wasGPU() then bias_updates.pushToDevice;
+  if not weights.wasGPU() then weights.pushToDevice;
+  if not weight_updates.wasGPU() then weight_updates.pushToDevice;
+
+  learning_rate := args.learningRate * learningRateScale;
+
+  ocl.axpy(biases.size(), learning_rate / args.batch, bias_updates.devData,1, biases.devData, 1
+  {$IFDEF CL_EVENTS}
+  , batch, pointer(events),  pointer(events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+
+  ocl.scale(bias_updates.Size(), args.momentum, bias_updates.devData, 1
+  {$IFDEF CL_EVENTS}
+  , 1 ,pointer(events),  pointer(events));
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+
+  ocl.axpy(weight_updates.size(), -args.decay * args.batch, weights.devData, 1, weight_updates.devData, 1
+  {$IFDEF CL_EVENTS}
+  , 1, @events[1],  @events[1]);
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+
+  ocl.axpy(weights.Size(), learning_Rate / args.batch, weight_updates.devData, 1, weights.devData, 1
+  {$IFDEF CL_EVENTS}
+  , 1, @events[1],  @events[1]);
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+
+  ocl.scale(weight_updates.size(), args.momentum, weight_updates.devData, 1
+  {$IFDEF CL_EVENTS}
+  , 1, @events[1],  @events[1]);
+  {$ELSE}
+  , 0, nil, nil);
+  {$ENDIF}
+  //ocl.waitForEvents(batch, pointer(events));
+  //ocl.finish();
+
+  if assigned(scales.Data) then begin
+      scales.axpy(learning_rate / args.batch, scale_updates);
+      scale_updates.multiply(args.momentum);
+  end;
+
+  //update(args);
+  //ocl.waitForEvents(batch, pointer(events));
+
+  inherited;
+
+  {$ifdef USE_TELEMETRY}
+  if benchmark then metrics.update.finish(layerType);
+  {$endif}
+end;
+{$endif}
 
 initialization
 
